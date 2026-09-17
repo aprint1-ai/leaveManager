@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>직원 연차 관리 시스템</title>
+  <title>직원 연차 관리 시스템 (권한 적용버전)</title>
   
   <!-- CSS 및 아이콘 불러오기 -->
   <script src="https://cdn.tailwindcss.com"></script>
@@ -24,17 +24,10 @@
     
     /* 🖨️ 인쇄 전용 스타일 (평소엔 숨김, 인쇄시에만 보임) */
     @media print {
-      /* margin: 0으로 설정하여 브라우저의 기본 머리글(제목)과 바닥글(경로, 페이지번호)을 강제로 숨깁니다. */
       @page { margin: 0; size: A4 portrait; } 
-      
-      /* body 대신 개별 직원 페이지 박스에 여백을 설정합니다. */
       body { background-color: white; margin: 0; padding: 0; } 
-      
       .print-hide { display: none !important; }
       .print-show { display: block !important; }
-      
-      /* 2페이지부터 여백이 없어지는 현상 해결: 
-         각 직원의 인쇄 컨테이너 자체에 상하좌우 15mm 패딩을 강제 부여합니다. */
       .page-break { 
         page-break-after: always; 
         padding: 15mm; 
@@ -75,6 +68,22 @@
       const [isLoading, setIsLoading] = useState(true);
       const [setupError, setSetupError] = useState(null); 
 
+      // 🔐 권한 및 로그인 관련 상태
+      const [managers, setManagers] = useState([]);
+      const [currentUser, setCurrentUser] = useState(() => {
+        const saved = sessionStorage.getItem('leave_app_manager');
+        return saved ? JSON.parse(saved) : null;
+      });
+
+      const [loginUsername, setLoginUsername] = useState('');
+      const [loginPassword, setLoginPassword] = useState('');
+      const [loginError, setLoginError] = useState('');
+
+      const [showManagerModal, setShowManagerModal] = useState(false);
+      const [mgrForm, setMgrForm] = useState({
+        id: null, username: '', password: '', name: '', role: 'team_admin', allowedCompany: '전체', allowedTeam: '전체'
+      });
+
       const today = new Date().toISOString().split('T')[0];
       const [targetDate, setTargetDate] = useState(today);
 
@@ -93,22 +102,17 @@
       const [newTeam, setNewTeam] = useState('');
 
       // 검색 및 필터 상태
-      const [searchQuery, setSearchQuery] = useState(''); // 이름 검색
+      const [searchQuery, setSearchQuery] = useState('');
       const [sortConfig, setSortConfig] = useState({ key: 'joinDate', direction: 'asc' });
       const [activeCompany, setActiveCompany] = useState('전체');
       
-      // 분리된 회사 및 팀 드롭다운 필터 상태
       const [showCompanyFilterDropdown, setShowCompanyFilterDropdown] = useState(false);
       const [showTeamFilterDropdown, setShowTeamFilterDropdown] = useState(false);
       const [activeTeam, setActiveTeam] = useState('전체');
 
-      // 인쇄용 선택 상태
       const [selectedEmpIds, setSelectedEmpIds] = useState([]);
-
-      // 백업 파일 인풋 ref
       const fileInputRef = useRef(null);
 
-      // 폼 (퇴사 정보 포함)
       const [formData, setFormData] = useState({ 
         name: '', company: '', team: '', joinDate: '', 
         usedFullDays: 0, usedHalfDays: 0, 
@@ -117,7 +121,7 @@
 
       const [recordForm, setRecordForm] = useState({ id: null, type: 'full', startDate: today, endDate: today, days: 1, memo: '' });
 
-      // 1. 로그인
+      // 1. 로그인 (익명 인증)
       useEffect(() => {
         signInAnonymously(auth).then((userCredential) => {
           setUser(userCredential.user);
@@ -128,10 +132,11 @@
         });
       }, []);
 
-      // 2. 데이터 실시간 로드
+      // 2. 데이터 실시간 로드 (설정, 직원, 관리자 계정)
       useEffect(() => {
         if (!user) return;
 
+        // 소속 정보
         const metaRef = doc(db, 'settings', 'metadata');
         const unsubMeta = onSnapshot(metaRef, (docSnap) => {
           if (docSnap.exists()) {
@@ -143,6 +148,7 @@
           }
         });
 
+        // 직원 정보
         const empRef = collection(db, 'employees');
         const unsubEmp = onSnapshot(empRef, (snapshot) => {
           const emps = [];
@@ -151,8 +157,41 @@
           setIsLoading(false);
         });
 
-        return () => { unsubMeta(); unsubEmp(); };
+        // 🔐 관리자 계정 목록 (초기 마스터 자동 생성을 위함)
+        const mgrRef = collection(db, 'managers');
+        const unsubMgr = onSnapshot(mgrRef, (snapshot) => {
+          const mgrs = [];
+          snapshot.forEach(d => mgrs.push({ id: d.id, ...d.data() }));
+
+          if (mgrs.length === 0) {
+            // 최초 데이터가 없을 경우 기본 마스터 계정(admin / 1234) 하나 생성
+            const defaultMaster = {
+              username: 'admin',
+              password: '1234',
+              name: '총괄 마스터',
+              role: 'master',
+              allowedCompany: '전체',
+              allowedTeam: '전체'
+            };
+            setDoc(doc(db, 'managers', 'master_default'), defaultMaster);
+          }
+          setManagers(mgrs);
+        });
+
+        return () => { unsubMeta(); unsubEmp(); unsubMgr(); };
       }, [user]);
+
+      // 팀장 로그인 시 해당 권한의 회사/팀으로 고정
+      useEffect(() => {
+        if (currentUser && currentUser.role === 'team_admin') {
+          if (currentUser.allowedCompany && currentUser.allowedCompany !== '전체') {
+            setActiveCompany(currentUser.allowedCompany);
+          }
+          if (currentUser.allowedTeam && currentUser.allowedTeam !== '전체') {
+            setActiveTeam(currentUser.allowedTeam);
+          }
+        }
+      }, [currentUser]);
 
       // 3. 기록 모달 동기화
       useEffect(() => {
@@ -163,7 +202,59 @@
         }
       }, [employees]);
 
-      // 4. 연차 주기 및 발생 연차 계산 로직 (입사일 기준 주기 적용)
+      // 🔐 사용자 로그인 / 로그아웃 처리
+      const handleLogin = (e) => {
+        e.preventDefault();
+        setLoginError('');
+        const matched = managers.find(m => m.username.trim() === loginUsername.trim() && m.password.trim() === loginPassword.trim());
+        if (matched) {
+          setCurrentUser(matched);
+          sessionStorage.setItem('leave_app_manager', JSON.stringify(matched));
+          setLoginUsername('');
+          setLoginPassword('');
+        } else {
+          setLoginError('아이디 또는 비밀번호가 올바르지 않습니다.');
+        }
+      };
+
+      const handleLogout = () => {
+        setCurrentUser(null);
+        sessionStorage.removeItem('leave_app_manager');
+      };
+
+      // 🔐 마스터 계정 관리 (계정 추가/수정/삭제)
+      const handleSaveManager = async (e) => {
+        e.preventDefault();
+        if (!mgrForm.username || !mgrForm.password || !mgrForm.name) {
+          return alert('아이디, 비밀번호, 성함을 모두 입력해주세요.');
+        }
+
+        if (!mgrForm.id) {
+          const exists = managers.some(m => m.username.trim() === mgrForm.username.trim());
+          if (exists) return alert('이미 존재하는 아이디입니다.');
+        }
+
+        const newId = mgrForm.id || Date.now().toString();
+        await setDoc(doc(db, 'managers', newId), {
+          username: mgrForm.username.trim(),
+          password: mgrForm.password.trim(),
+          name: mgrForm.name.trim(),
+          role: mgrForm.role,
+          allowedCompany: mgrForm.allowedCompany || '전체',
+          allowedTeam: mgrForm.allowedTeam || '전체'
+        }, { merge: true });
+
+        setMgrForm({ id: null, username: '', password: '', name: '', role: 'team_admin', allowedCompany: '전체', allowedTeam: '전체' });
+        alert('관리자 계정이 저장되었습니다.');
+      };
+
+      const handleDeleteManager = async (id) => {
+        if (confirm('이 관리자 계정을 삭제하시겠습니까?')) {
+          await deleteDoc(doc(db, 'managers', id));
+        }
+      };
+
+      // 4. 연차 주기 및 발생 연차 계산 로직
       const calculateStats = (joinDateStr, targetDateStr, isResigned, resDateStr) => {
         if (!joinDateStr) return { years: 0, months: 0, generated: 0, label: '-', periodStartStr: '', periodEndStr: '' };
         
@@ -209,12 +300,13 @@
       };
 
       useEffect(() => {
-        setActiveTeam('전체');
-        setShowTeamFilterDropdown(false);
-        setShowCompanyFilterDropdown(false);
+        if (!currentUser || currentUser.role === 'master') {
+          setActiveTeam('전체');
+          setShowTeamFilterDropdown(false);
+          setShowCompanyFilterDropdown(false);
+        }
       }, [activeCompany]);
 
-      // 현재 활성화된 회사에 속한 팀 목록만 추출
       const availableTeams = useMemo(() => {
         const filterSet = new Set();
         employees.forEach(emp => {
@@ -225,18 +317,45 @@
         return Array.from(filterSet).sort();
       }, [employees, activeCompany]);
 
+      // 계정 추가/수정 모달에서 선택한 회사의 팀만 연동하여 추출
+      const formAvailableTeams = useMemo(() => {
+        if (!mgrForm.allowedCompany || mgrForm.allowedCompany === '전체') {
+          return teams;
+        }
+        const filterSet = new Set();
+        employees.forEach(emp => {
+          if (emp.company === mgrForm.allowedCompany && emp.team) {
+            filterSet.add(emp.team);
+          }
+        });
+        const teamList = Array.from(filterSet).filter(t => t.trim() !== '').sort();
+        return teamList.length > 0 ? teamList : teams;
+      }, [employees, teams, mgrForm.allowedCompany]);
+
       const handleSort = (key) => {
         let direction = 'asc';
         if (sortConfig.key === key && sortConfig.direction === 'asc') direction = 'desc';
         setSortConfig({ key, direction });
       };
 
-      // 전체 리스트 계산 (검색, 필터, 정렬 및 연차 주기 차감 적용)
+      // 🔐 권한에 따른 계산 목록 (팀장일 경우 자기 담당 팀원만 조회)
       const computedEmployees = useMemo(() => {
-        let result = employees.filter(emp => activeCompany === '전체' || emp.company === activeCompany);
-        
-        if (activeTeam !== '전체') {
-          result = result.filter(emp => (emp.team || '') === activeTeam);
+        let result = employees;
+
+        // 팀장 권한 필터링
+        if (currentUser && currentUser.role === 'team_admin') {
+          if (currentUser.allowedCompany && currentUser.allowedCompany !== '전체') {
+            result = result.filter(emp => emp.company === currentUser.allowedCompany);
+          }
+          if (currentUser.allowedTeam && currentUser.allowedTeam !== '전체') {
+            result = result.filter(emp => (emp.team || '') === currentUser.allowedTeam);
+          }
+        } else {
+          // 마스터 권한인 경우 선택된 탭/드롭다운 필터 적용
+          result = result.filter(emp => activeCompany === '전체' || emp.company === activeCompany);
+          if (activeTeam !== '전체') {
+            result = result.filter(emp => (emp.team || '') === activeTeam);
+          }
         }
 
         if (searchQuery.trim() !== '') {
@@ -266,7 +385,6 @@
         return result.map(emp => {
           const stats = calculateStats(emp.joinDate, targetDate, emp.isResigned, emp.resignationDate);
           
-          // 💡 당해 연차 주기(stats.periodStartStr ~ stats.periodEndStr) 내에 사용한 연차만 정확히 계산
           const recordsUsedPeriod = (emp.leaveRecords || []).reduce((acc, r) => {
             if (r.type === 'replace_full' || r.type === 'replace_half') return acc;
             if (r.startDate >= stats.periodStartStr && r.startDate <= stats.periodEndStr) {
@@ -275,7 +393,6 @@
             return acc;
           }, 0);
 
-          // 과거 전체 기간 누적 사용량 (참고용)
           const recordsUsedAllTime = (emp.leaveRecords || []).reduce((acc, r) => {
             if (r.type === 'replace_full' || r.type === 'replace_half') return acc;
             return acc + Number(r.days);
@@ -283,17 +400,14 @@
 
           const legacyUsed = (emp.usedFullDays || 0) + ((emp.usedHalfDays || 0) * 0.5);
           
-          // 1년 미만이거나 수기 데이터용 legacyUsed 포함 계산
           const usedPeriodTotal = recordsUsedPeriod + (stats.years === 0 ? legacyUsed : 0);
           const usedTotalAllTime = recordsUsedAllTime + legacyUsed;
           
-          // 당해 연차 주기 기준 잔여 연차
           const remaining = Math.max(0, stats.generated - usedPeriodTotal);
           return { ...emp, stats, legacyUsed, recordsUsedPeriod, recordsUsedAllTime, usedPeriodTotal, usedTotalAllTime, remaining };
         });
-      }, [employees, targetDate, sortConfig, activeCompany, activeTeam, searchQuery]);
+      }, [employees, targetDate, sortConfig, activeCompany, activeTeam, searchQuery, currentUser]);
 
-      // 체크박스 (단일 및 전체 선택)
       const handleSelectAll = (e) => {
         if (e.target.checked) setSelectedEmpIds(computedEmployees.map(emp => emp.id));
         else setSelectedEmpIds([]);
@@ -304,7 +418,6 @@
         else setSelectedEmpIds([...selectedEmpIds, id]);
       };
 
-      // 인쇄 기능
       const handlePrint = () => {
         if (selectedEmpIds.length === 0) return alert('인쇄할 직원을 먼저 체크박스로 선택해주세요.');
         const selectedNames = computedEmployees.filter(emp => selectedEmpIds.includes(emp.id)).map(emp => emp.name);
@@ -319,7 +432,7 @@
         window.print();
       };
 
-      // 💾 시스템 백업 다운로드 (JSON - 파이어베이스 복구용)
+      // 백업 및 다운로드
       const handleExportBackup = () => {
         const backupData = {
           version: 'v4_backup',
@@ -337,26 +450,20 @@
         URL.revokeObjectURL(url);
       };
 
-      // 📊 엑셀 다운로드 (CSV / BOM 포함으로 엑셀 한글 깨짐 완전 방지)
       const handleExportExcel = () => {
         if (!computedEmployees || computedEmployees.length === 0) {
           return alert('내보낼 직원 데이터가 없습니다.');
         }
 
         let csvContent = "\uFEFF";
-        
-        // 1. 직원별 연차 현황 헤더
         csvContent += "이름,회사,팀,입사일,근속 상태,당해 발생 연차,당해 사용 연차,당해 잔여 연차,전체 누적 사용일수,퇴사 여부,퇴사일\n";
 
-        // 2. 직원별 연차 현황 행 데이터
         computedEmployees.forEach(emp => {
           const isResigned = emp.isResigned ? "퇴사" : "재직";
           const resDate = emp.resignationDate || "";
-
           csvContent += `"${emp.name}","${emp.company || ''}","${emp.team || ''}","${emp.joinDate}","${emp.stats.label}",${emp.stats.generated},${emp.usedPeriodTotal},${emp.remaining},${emp.usedTotalAllTime},"${isResigned}","${resDate}"\n`;
         });
 
-        // 3. 상세 연차 사용 내역 섹션
         csvContent += "\n\n--- 상세 연차 사용 내역 ---\n";
         csvContent += "직원명,회사,팀,사용 시작일,사용 종료일,연차 유형,차감 일수,사유 및 메모\n";
 
@@ -380,7 +487,6 @@
         URL.revokeObjectURL(url);
       };
 
-      // 📥 백업 복구하기 (JSON 업로드)
       const handleImportBackup = (e) => {
         const file = e.target.files[0];
         if (!file) return;
@@ -419,7 +525,7 @@
         reader.readAsText(file);
       };
 
-      // 직원 추가/수정
+      // 마스터 전용: 직원 추가/수정/삭제
       const handleAddSubmit = async (e) => {
         e.preventDefault();
         if (!formData.name || !formData.joinDate) return alert('이름과 입사일을 입력해주세요.');
@@ -434,6 +540,7 @@
       };
 
       const openEditModal = (emp) => {
+        if (currentUser?.role === 'team_admin') return; // 팀장 권한 제한
         setFormData({ 
           name: emp.name, company: emp.company || '', team: emp.team || '', 
           joinDate: emp.joinDate, usedFullDays: emp.usedFullDays || 0, usedHalfDays: emp.usedHalfDays || 0,
@@ -454,6 +561,7 @@
       };
 
       const handleDelete = async (id) => {
+        if (currentUser?.role === 'team_admin') return; // 팀장 권한 제한
         if(confirm("정말로 이 직원을 삭제하시겠습니까?\n(등록된 연차 기록도 모두 삭제됩니다)")) {
           await deleteDoc(doc(db, 'employees', id));
           setSelectedEmpIds(selectedEmpIds.filter(empId => empId !== id)); 
@@ -514,9 +622,9 @@
         });
       };
 
-      // 💡 동시 수정 덮어쓰기 방지: 최신 상태 참조 후 레코드 업데이트
       const handleSaveRecord = async (e) => {
         e.preventDefault();
+        if (currentUser?.role === 'team_admin') return; // 팀장 권한 제한
         if (!recordForm.startDate) return alert('날짜를 입력하세요.');
         if ((recordForm.type === 'full' || recordForm.type === 'replace_full') && !recordForm.endDate) return alert('종료일을 입력하세요.');
 
@@ -535,6 +643,7 @@
       };
 
       const handleEditRecord = (record) => {
+        if (currentUser?.role === 'team_admin') return;
         setRecordForm({ 
           ...record,
           days: (record.type === 'replace_full' || record.type === 'replace_half') ? 0 : record.days
@@ -542,6 +651,7 @@
       };
 
       const handleDeleteRecord = async (recordId) => {
+        if (currentUser?.role === 'team_admin') return;
         if (!confirm("이 연차 사용 기록을 삭제하시겠습니까?")) return;
         const latestEmp = employees.find(e => e.id === historyEmployee.id) || historyEmployee;
         const updatedRecords = (latestEmp.leaveRecords || []).filter(r => r.id !== recordId);
@@ -549,7 +659,6 @@
         if (recordForm.id === recordId) setRecordForm({ id: null, type: 'full', startDate: today, endDate: today, days: 1, memo: '' });
       };
 
-      // 연차 유형 라벨 및 스타일 도우미 함수
       const getTypeLabel = (type) => {
         if (type === 'half') return '반차';
         if (type === 'replace_full') return '연차(대체)';
@@ -563,7 +672,7 @@
         return 'bg-blue-100 text-blue-700';
       };
 
-      // 소속 관리
+      // 소속 관리 (마스터 전용)
       const handleAddCompany = async () => {
         if (newCompany.trim() && !companies.includes(newCompany.trim())) {
           await setDoc(doc(db, 'settings', 'metadata'), { companies: [...companies, newCompany.trim()] }, { merge: true });
@@ -600,6 +709,65 @@
           <div className="min-h-screen bg-gray-50 flex flex-col items-center justify-center space-y-4">
             <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
             <p className="text-gray-500 font-medium">사내 데이터베이스 연결 중...</p>
+          </div>
+        );
+      }
+
+      // 🔐 비로그인 상태인 경우 [로그인 화면] 렌더링
+      if (!currentUser) {
+        return (
+          <div className="min-h-screen bg-slate-900 flex items-center justify-center p-4 font-sans">
+            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden border border-slate-700">
+              <div className="bg-blue-600 p-6 text-white text-center">
+                <div className="bg-white/20 w-16 h-16 rounded-2xl flex items-center justify-center mx-auto mb-3 backdrop-blur-sm">
+                  <i className="fa-solid fa-lock text-3xl text-white"></i>
+                </div>
+                <h2 className="text-2xl font-extrabold tracking-tight">연차 관리 시스템 로그인</h2>
+                <p className="text-blue-100 text-xs mt-1">부여받으신 계정 정보를 입력해 주세요</p>
+              </div>
+              <form onSubmit={handleLogin} className="p-6 space-y-4">
+                {loginError && (
+                  <div className="bg-red-50 border border-red-200 text-red-600 text-xs p-3 rounded-lg flex items-center font-bold">
+                    <i className="fa-solid fa-triangle-exclamation mr-2 text-sm"></i>
+                    {loginError}
+                  </div>
+                )}
+                <div>
+                  <label className="block text-xs font-bold text-gray-700 mb-1">아이디 (ID)</label>
+                  <input
+                    type="text"
+                    required
+                    value={loginUsername}
+                    onChange={(e) => setLoginUsername(e.target.value)}
+                    placeholder="아이디 입력"
+                    className="w-full p-3 border border-gray-300 rounded-lg text-sm outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-gray-700 mb-1">비밀번호</label>
+                  <input
+                    type="password"
+                    required
+                    value={loginPassword}
+                    onChange={(e) => setLoginPassword(e.target.value)}
+                    placeholder="비밀번호 입력"
+                    className="w-full p-3 border border-gray-300 rounded-lg text-sm outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                </div>
+                <button
+                  type="submit"
+                  className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 rounded-lg shadow-md transition-colors text-sm flex items-center justify-center gap-2"
+                >
+                  <i className="fa-solid fa-right-to-bracket"></i> 로그인하기
+                </button>
+
+                <div className="bg-blue-50 border border-blue-100 p-3 rounded-lg text-[11px] text-blue-800 space-y-1">
+                  <p className="font-bold flex items-center"><i className="fa-solid fa-circle-info mr-1"></i> 초기 마스터 계정 정보</p>
+                  <p>• 마스터 ID: <code className="bg-white px-1 py-0.5 rounded font-bold border border-blue-200">admin</code> / PW: <code className="bg-white px-1 py-0.5 rounded font-bold border border-blue-200">1234</code></p>
+                  <p>• 로그인 후 상단 [계정 관리] 메뉴에서 팀장 계정을 새로 추가할 수 있습니다.</p>
+                </div>
+              </form>
+            </div>
           </div>
         );
       }
@@ -674,7 +842,15 @@
                       직원 연차 관리 시스템
                       <span className="text-[10px] bg-green-100 text-green-700 px-2 py-0.5 rounded-full uppercase font-bold tracking-wider">실시간 동기화 ON</span>
                     </h1>
-                    <p className="text-gray-400 text-xs mt-1 font-medium">Copyright © {new Date().getFullYear()} 푸드윈 홀딩스(Foodwin Holdings). All rights reserved.</p>
+                    <div className="flex items-center space-x-2 mt-1">
+                      <span className={`text-xs font-bold px-2 py-0.5 rounded-md flex items-center gap-1 ${currentUser.role === 'master' ? 'bg-amber-100 text-amber-800' : 'bg-blue-100 text-blue-800'}`}>
+                        <i className={`fa-solid ${currentUser.role === 'master' ? 'fa-crown text-amber-600' : 'fa-user-shield text-blue-600'}`}></i>
+                        {currentUser.role === 'master' ? '총괄 마스터' : `${currentUser.name} (${currentUser.allowedTeam || currentUser.allowedCompany}) [조회 전용]`}
+                      </span>
+                      <button onClick={handleLogout} className="text-xs text-gray-400 hover:text-red-600 underline font-medium ml-2">
+                        <i className="fa-solid fa-right-from-bracket mr-1"></i>로그아웃
+                      </button>
+                    </div>
                   </div>
                 </div>
 
@@ -686,25 +862,51 @@
                       <input type="date" value={targetDate} onChange={(e) => setTargetDate(e.target.value)} className="bg-transparent border-none text-sm font-bold focus:ring-0 cursor-pointer outline-none" />
                     </div>
                   </div>
-                  <button onClick={() => setShowBackupModal(true)} className="bg-white hover:bg-gray-50 border border-gray-200 text-gray-700 px-4 py-3 rounded-lg font-bold flex items-center space-x-1.5 transition-colors whitespace-nowrap text-sm" title="백업 및 엑셀 다운로드">
-                    <i className="fa-solid fa-database text-blue-600"></i><span>백업/복구</span>
-                  </button>
-                  <button onClick={() => setShowAffiliationModal(true)} className="bg-white hover:bg-gray-50 border border-gray-200 text-gray-700 px-3 py-3 rounded-lg font-bold flex items-center space-x-1.5 transition-colors whitespace-nowrap text-sm">
-                    <i className="fa-solid fa-gear"></i><span>소속 편집</span>
-                  </button>
-                  <button onClick={() => { setFormData({ name: '', company: companies[0] || '', team: teams[0] || '', joinDate: today, usedFullDays: 0, usedHalfDays: 0, isResigned: false, resignationDate: '' }); setShowAddModal(true); }} className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-3 rounded-lg font-bold flex items-center space-x-2 transition-colors whitespace-nowrap text-sm">
-                    <i className="fa-solid fa-user-plus"></i><span>직원 추가</span>
-                  </button>
+
+                  {/* 마스터 권한 전용 메뉴 버튼 */}
+                  {currentUser.role === 'master' && (
+                    <>
+                      <button onClick={() => setShowManagerModal(true)} className="bg-amber-50 hover:bg-amber-100 border border-amber-200 text-amber-900 px-3.5 py-3 rounded-lg font-bold flex items-center space-x-1.5 transition-colors whitespace-nowrap text-sm" title="팀장 및 마스터 계정 관리">
+                        <i className="fa-solid fa-users-gear text-amber-600"></i><span>계정 관리</span>
+                      </button>
+                      <button onClick={() => setShowBackupModal(true)} className="bg-white hover:bg-gray-50 border border-gray-200 text-gray-700 px-3.5 py-3 rounded-lg font-bold flex items-center space-x-1.5 transition-colors whitespace-nowrap text-sm" title="백업 및 엑셀 다운로드">
+                        <i className="fa-solid fa-database text-blue-600"></i><span>백업/복구</span>
+                      </button>
+                      <button onClick={() => setShowAffiliationModal(true)} className="bg-white hover:bg-gray-50 border border-gray-200 text-gray-700 px-3 py-3 rounded-lg font-bold flex items-center space-x-1.5 transition-colors whitespace-nowrap text-sm">
+                        <i className="fa-solid fa-gear"></i><span>소속 편집</span>
+                      </button>
+                      <button onClick={() => { setFormData({ name: '', company: companies[0] || '', team: teams[0] || '', joinDate: today, usedFullDays: 0, usedHalfDays: 0, isResigned: false, resignationDate: '' }); setShowAddModal(true); }} className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-3 rounded-lg font-bold flex items-center space-x-2 transition-colors whitespace-nowrap text-sm">
+                        <i className="fa-solid fa-user-plus"></i><span>직원 추가</span>
+                      </button>
+                    </>
+                  )}
+
+                  {/* 팀장(Read-Only)인 경우 엑셀 다운로드 팝업만 허용 */}
+                  {currentUser.role === 'team_admin' && (
+                    <button onClick={() => setShowBackupModal(true)} className="bg-white hover:bg-gray-50 border border-gray-200 text-gray-700 px-3.5 py-3 rounded-lg font-bold flex items-center space-x-1.5 transition-colors whitespace-nowrap text-sm">
+                      <i className="fa-solid fa-file-excel text-green-600"></i><span>엑셀 내보내기</span>
+                    </button>
+                  )}
                 </div>
               </div>
 
               {/* Company Tabs & Search & Print */}
               <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
                 <div className="flex space-x-2 overflow-x-auto pb-2 scrollbar-hide flex-1 w-full">
-                  <button onClick={() => setActiveCompany('전체')} className={`px-5 py-2.5 rounded-xl font-bold text-sm whitespace-nowrap transition-colors ${activeCompany === '전체' ? 'bg-blue-600 text-white shadow-md' : 'bg-white text-gray-600 border border-gray-200 hover:bg-gray-50'}`}>전체</button>
-                  {companies.map((c, i) => (
-                    <button key={i} onClick={() => setActiveCompany(c)} className={`px-5 py-2.5 rounded-xl font-bold text-sm whitespace-nowrap transition-colors ${activeCompany === c ? 'bg-blue-600 text-white shadow-md' : 'bg-white text-gray-600 border border-gray-200 hover:bg-gray-50'}`}>{c}</button>
-                  ))}
+                  {currentUser.role === 'master' ? (
+                    <>
+                      <button onClick={() => setActiveCompany('전체')} className={`px-5 py-2.5 rounded-xl font-bold text-sm whitespace-nowrap transition-colors ${activeCompany === '전체' ? 'bg-blue-600 text-white shadow-md' : 'bg-white text-gray-600 border border-gray-200 hover:bg-gray-50'}`}>전체</button>
+                      {companies.map((c, i) => (
+                        <button key={i} onClick={() => setActiveCompany(c)} className={`px-5 py-2.5 rounded-xl font-bold text-sm whitespace-nowrap transition-colors ${activeCompany === c ? 'bg-blue-600 text-white shadow-md' : 'bg-white text-gray-600 border border-gray-200 hover:bg-gray-50'}`}>{c}</button>
+                      ))}
+                    </>
+                  ) : (
+                    <div className="bg-blue-600 text-white px-5 py-2.5 rounded-xl font-bold text-sm whitespace-nowrap flex items-center gap-2">
+                      <i className="fa-solid fa-building"></i>
+                      {currentUser.allowedCompany === '전체' ? '전체 회사' : currentUser.allowedCompany} 
+                      {currentUser.allowedTeam !== '전체' && ` - ${currentUser.allowedTeam}`}
+                    </div>
+                  )}
                 </div>
                 
                 <div className="flex items-center space-x-3 w-full md:w-auto">
@@ -746,83 +948,17 @@
                             />
                           </th>
                           <th className="p-4 font-semibold">이름</th>
+                          
                           <th className="p-4 font-semibold relative">
                             <div className="flex items-center space-x-1">
-                              <div className="flex items-center cursor-pointer hover:text-blue-600 select-none" onClick={() => handleSort('company')}>
-                                <span>회사</span>
-                                {sortConfig.key === 'company' ? (sortConfig.direction === 'asc' ? <i className="fa-solid fa-chevron-up text-xs ml-1"></i> : <i className="fa-solid fa-chevron-down text-xs ml-1"></i>) : <i className="fa-solid fa-chevron-up text-xs ml-1 opacity-0"></i>}
-                              </div>
-                              <button onClick={(e) => { e.stopPropagation(); setShowCompanyFilterDropdown(!showCompanyFilterDropdown); setShowTeamFilterDropdown(false); }} className={`p-1 rounded ${activeCompany !== '전체' || showCompanyFilterDropdown ? 'text-blue-600 bg-blue-50' : 'text-gray-400 hover:text-blue-600 hover:bg-gray-100'}`} title="회사 필터">
-                                <i className="fa-solid fa-filter text-sm"></i>
-                              </button>
+                              <span>회사</span>
                             </div>
-                            
-                            {showCompanyFilterDropdown && (
-                              <div className="absolute top-full left-4 mt-2 bg-white border border-gray-200 shadow-xl rounded-lg p-3 z-20 w-48 font-normal">
-                                <div className="text-xs text-gray-500 mb-2 font-bold flex justify-between items-center">
-                                  <span>회사 선택</span>
-                                  <button onClick={() => setShowCompanyFilterDropdown(false)} className="text-gray-400 hover:text-gray-700"><i className="fa-solid fa-xmark"></i></button>
-                                </div>
-                                <div className="space-y-2 max-h-48 overflow-y-auto">
-                                  <label className="flex items-center space-x-2 cursor-pointer group">
-                                    <input type="radio" name="comp_filter" checked={activeCompany === '전체'} onChange={() => { setActiveCompany('전체'); setShowCompanyFilterDropdown(false); }} className="text-blue-600 focus:ring-blue-500" />
-                                    <span className="text-sm text-gray-700 group-hover:text-blue-600 truncate">전체 보기</span>
-                                  </label>
-                                  {companies.map((c, i) => (
-                                    <label key={i} className="flex items-center space-x-2 cursor-pointer group">
-                                      <input type="radio" name="comp_filter" checked={activeCompany === c} onChange={() => { setActiveCompany(c); setShowCompanyFilterDropdown(false); }} className="text-blue-600 focus:ring-blue-500" />
-                                      <span className="text-sm text-gray-700 group-hover:text-blue-600 truncate">{c}</span>
-                                    </label>
-                                  ))}
-                                </div>
-                              </div>
-                            )}
                           </th>
 
                           <th className="p-4 font-semibold relative">
                             <div className="flex items-center space-x-1">
-                              <div className="flex items-center cursor-pointer hover:text-blue-600 select-none" onClick={() => handleSort('team')}>
-                                <span>팀</span>
-                                {sortConfig.key === 'team' ? (sortConfig.direction === 'asc' ? <i className="fa-solid fa-chevron-up text-xs ml-1"></i> : <i className="fa-solid fa-chevron-down text-xs ml-1"></i>) : <i className="fa-solid fa-chevron-up text-xs ml-1 opacity-0"></i>}
-                              </div>
-                              <button onClick={(e) => { e.stopPropagation(); setShowTeamFilterDropdown(!showTeamFilterDropdown); setShowCompanyFilterDropdown(false); }} className={`p-1 rounded ${activeTeam !== '전체' || showTeamFilterDropdown ? 'text-blue-600 bg-blue-50' : 'text-gray-400 hover:text-blue-600 hover:bg-gray-100'}`} title="팀 필터">
-                                <i className="fa-solid fa-filter text-sm"></i>
-                              </button>
+                              <span>팀</span>
                             </div>
-                            
-                            {showTeamFilterDropdown && (
-                              <div className="absolute top-full left-4 mt-2 bg-white border border-gray-200 shadow-xl rounded-lg p-3 z-20 w-48 font-normal">
-                                <div className="text-xs text-gray-500 mb-2 font-bold flex justify-between items-center">
-                                  <span>팀 선택</span>
-                                  <button onClick={() => setShowTeamFilterDropdown(false)} className="text-gray-400 hover:text-gray-700"><i className="fa-solid fa-xmark"></i></button>
-                                </div>
-                                <div className="space-y-2 max-h-48 overflow-y-auto">
-                                  <label className="flex items-center space-x-2 cursor-pointer group border-b border-gray-100 pb-2 mb-2">
-                                    <input 
-                                      type="radio" 
-                                      name="team_filter"
-                                      checked={activeTeam === '전체'} 
-                                      onChange={() => { setActiveTeam('전체'); setShowTeamFilterDropdown(false); }} 
-                                      className="text-blue-600 focus:ring-blue-500" 
-                                    />
-                                    <span className="text-sm font-bold text-gray-800 group-hover:text-blue-600 truncate">전체 보기</span>
-                                  </label>
-                                  
-                                  {availableTeams.map((t, i) => (
-                                    <label key={i} className="flex items-center space-x-2 cursor-pointer group">
-                                      <input 
-                                        type="radio" 
-                                        name="team_filter"
-                                        checked={activeTeam === t} 
-                                        onChange={() => { setActiveTeam(t); setShowTeamFilterDropdown(false); }} 
-                                        className="text-blue-600 focus:ring-blue-500" 
-                                      />
-                                      <span className="text-sm text-gray-700 group-hover:text-blue-600 truncate">{t === '' ? '(팀 없음)' : t}</span>
-                                    </label>
-                                  ))}
-                                </div>
-                              </div>
-                            )}
                           </th>
 
                           <th className="p-4 font-semibold">
@@ -835,12 +971,16 @@
                           <th className="p-4 font-semibold text-center">당해 발생</th>
                           <th className="p-4 font-semibold text-center">당해 사용</th>
                           <th className="p-4 font-semibold text-center">잔여</th>
-                          <th className="p-4 font-semibold text-center">정보 관리</th>
+                          
+                          {/* 마스터 권한에만 [정보 관리] 컬럼 표시 */}
+                          {currentUser.role === 'master' && (
+                            <th className="p-4 font-semibold text-center">정보 관리</th>
+                          )}
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-gray-100">
                         {computedEmployees.length === 0 ? (
-                          <tr><td colSpan="10" className="p-8 text-center text-gray-500">조건에 맞는 직원이 없습니다.</td></tr>
+                          <tr><td colSpan={currentUser.role === 'master' ? 10 : 9} className="p-8 text-center text-gray-500">조회할 직원 데이터가 없습니다.</td></tr>
                         ) : (
                           computedEmployees.map((emp) => (
                             <tr key={emp.id} className={`hover:bg-blue-50/50 transition-colors ${emp.isResigned ? 'opacity-50 bg-gray-50' : ''}`}>
@@ -888,12 +1028,16 @@
                               <td className="p-4 text-center">
                                 <span className={`text-xl font-extrabold ${emp.remaining <= 3 && emp.remaining > 0 ? 'text-orange-500' : emp.remaining === 0 ? 'text-red-500' : 'text-green-600'}`}>{emp.remaining}</span>
                               </td>
-                              <td className="p-4 text-center">
-                                <div className="flex justify-center space-x-2">
-                                  <button onClick={() => openEditModal(emp)} className="p-2 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors" title="직원 정보 수정"><i className="fa-solid fa-pen text-sm"></i></button>
-                                  <button onClick={() => handleDelete(emp.id)} className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors" title="직원 삭제"><i className="fa-solid fa-trash text-sm"></i></button>
-                                </div>
-                              </td>
+
+                              {/* 마스터 전용 수정/삭제 버튼 */}
+                              {currentUser.role === 'master' && (
+                                <td className="p-4 text-center">
+                                  <div className="flex justify-center space-x-2">
+                                    <button onClick={() => openEditModal(emp)} className="p-2 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors" title="직원 정보 수정"><i className="fa-solid fa-pen text-sm"></i></button>
+                                    <button onClick={() => handleDelete(emp.id)} className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors" title="직원 삭제"><i className="fa-solid fa-trash text-sm"></i></button>
+                                  </div>
+                                </td>
+                              )}
                             </tr>
                           ))
                         )}
@@ -922,22 +1066,26 @@
                         </button>
                       </div>
 
-                      <div className="bg-blue-50 border border-blue-200 p-4 rounded-xl">
-                        <h3 className="font-bold text-blue-900 mb-1 flex items-center"><i className="fa-solid fa-download mr-2 text-blue-600"></i> 2. 시스템 데이터 백업 (.json)</h3>
-                        <p className="text-xs text-blue-700 mb-3">파이어베이스 복구 전용 데이터 파일입니다.</p>
-                        <button onClick={handleExportBackup} className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2.5 rounded-lg text-sm transition-colors flex items-center justify-center">
-                          <i className="fa-solid fa-file-code mr-2"></i> 시스템 백업 파일 다운로드 (.json)
-                        </button>
-                      </div>
+                      {currentUser.role === 'master' && (
+                        <>
+                          <div className="bg-blue-50 border border-blue-200 p-4 rounded-xl">
+                            <h3 className="font-bold text-blue-900 mb-1 flex items-center"><i className="fa-solid fa-download mr-2 text-blue-600"></i> 2. 시스템 데이터 백업 (.json)</h3>
+                            <p className="text-xs text-blue-700 mb-3">파이어베이스 복구 전용 데이터 파일입니다.</p>
+                            <button onClick={handleExportBackup} className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2.5 rounded-lg text-sm transition-colors flex items-center justify-center">
+                              <i className="fa-solid fa-file-code mr-2"></i> 시스템 백업 파일 다운로드 (.json)
+                            </button>
+                          </div>
 
-                      <div className="bg-gray-100 border border-gray-300 p-4 rounded-xl">
-                        <h3 className="font-bold text-gray-900 mb-1 flex items-center"><i className="fa-solid fa-upload mr-2 text-gray-700"></i> 3. 백업 파일 복구</h3>
-                        <p className="text-xs text-gray-600 mb-3">저장해둔 JSON 시스템 백업 파일을 불러와 데이터를 원복합니다.</p>
-                        <input type="file" accept=".json" ref={fileInputRef} onChange={handleImportBackup} className="hidden" />
-                        <button onClick={() => fileInputRef.current && fileInputRef.current.click()} className="w-full bg-gray-800 hover:bg-gray-900 text-white font-bold py-2.5 rounded-lg text-sm transition-colors flex items-center justify-center">
-                          <i className="fa-solid fa-file-import mr-2"></i> 백업 파일 선택 및 복구 (.json)
-                        </button>
-                      </div>
+                          <div className="bg-gray-100 border border-gray-300 p-4 rounded-xl">
+                            <h3 className="font-bold text-gray-900 mb-1 flex items-center"><i className="fa-solid fa-upload mr-2 text-gray-700"></i> 3. 백업 파일 복구</h3>
+                            <p className="text-xs text-gray-600 mb-3">저장해둔 JSON 시스템 백업 파일을 불러와 데이터를 원복합니다.</p>
+                            <input type="file" accept=".json" ref={fileInputRef} onChange={handleImportBackup} className="hidden" />
+                            <button onClick={() => fileInputRef.current && fileInputRef.current.click()} className="w-full bg-gray-800 hover:bg-gray-900 text-white font-bold py-2.5 rounded-lg text-sm transition-colors flex items-center justify-center">
+                              <i className="fa-solid fa-file-import mr-2"></i> 백업 파일 선택 및 복구 (.json)
+                            </button>
+                          </div>
+                        </>
+                      )}
                     </div>
                     <div className="bg-gray-50 p-4 border-t border-gray-200 flex justify-end">
                       <button onClick={() => setShowBackupModal(false)} className="px-5 py-2 bg-gray-700 text-white rounded-lg text-sm font-semibold hover:bg-gray-800">닫기</button>
@@ -946,8 +1094,123 @@
                 </div>
               )}
 
-              {/* Add / Edit Employee Info Modal */}
-              {(showAddModal || editingEmployee) && (
+              {/* 👑 마스터 전용 계정 관리 모달 */}
+              {showManagerModal && currentUser?.role === 'master' && (
+                <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-[70]">
+                  <div className="bg-white rounded-2xl w-full max-w-2xl overflow-hidden shadow-2xl flex flex-col max-h-[90vh]">
+                    <div className="bg-amber-600 p-4 text-white flex justify-between items-center">
+                      <h2 className="font-bold text-lg flex items-center">
+                        <i className="fa-solid fa-users-gear mr-2"></i> 관리자 및 팀장 계정 설정
+                      </h2>
+                      <button onClick={() => setShowManagerModal(false)} className="text-amber-200 hover:text-white"><i className="fa-solid fa-xmark text-xl"></i></button>
+                    </div>
+                    
+                    <div className="p-6 overflow-y-auto space-y-6">
+                      {/* 신규 계정 등록/수정 폼 */}
+                      <form onSubmit={handleSaveManager} className="bg-amber-50 border border-amber-200 p-4 rounded-xl space-y-3">
+                        <h3 className="font-bold text-amber-900 text-sm flex items-center">
+                          <i className="fa-solid fa-user-plus mr-1.5"></i> {mgrForm.id ? '관리자 계정 정보 수정' : '새 관리자/팀장 계정 추가'}
+                        </h3>
+                        <div className="grid grid-cols-2 gap-3">
+                          <div>
+                            <label className="block text-xs font-bold text-gray-700 mb-1">아이디 (ID)</label>
+                            <input type="text" required value={mgrForm.username} onChange={(e) => setMgrForm({...mgrForm, username: e.target.value})} placeholder="예: dev_leader" className="w-full p-2 border border-gray-300 rounded text-xs outline-none bg-white" />
+                          </div>
+                          <div>
+                            <label className="block text-xs font-bold text-gray-700 mb-1">비밀번호</label>
+                            <input type="text" required value={mgrForm.password} onChange={(e) => setMgrForm({...mgrForm, password: e.target.value})} placeholder="비밀번호 설정" className="w-full p-2 border border-gray-300 rounded text-xs outline-none bg-white" />
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                          <div>
+                            <label className="block text-xs font-bold text-gray-700 mb-1">성함 / 직함</label>
+                            <input type="text" required value={mgrForm.name} onChange={(e) => setMgrForm({...mgrForm, name: e.target.value})} placeholder="예: 김철수 팀장" className="w-full p-2 border border-gray-300 rounded text-xs outline-none bg-white" />
+                          </div>
+                          <div>
+                            <label className="block text-xs font-bold text-gray-700 mb-1">역할 (권한)</label>
+                            <select value={mgrForm.role} onChange={(e) => setMgrForm({...mgrForm, role: e.target.value})} className="w-full p-2 border border-gray-300 rounded text-xs outline-none bg-white font-bold">
+                              <option value="team_admin">팀장 (조회 전용)</option>
+                              <option value="master">총괄 마스터 (전체 권한)</option>
+                            </select>
+                          </div>
+                          <div>
+                            <label className="block text-xs font-bold text-gray-700 mb-1">담당 회사 지정</label>
+                            <select value={mgrForm.allowedCompany} onChange={(e) => setMgrForm({...mgrForm, allowedCompany: e.target.value, allowedTeam: '전체'})} className="w-full p-2 border border-gray-300 rounded text-xs outline-none bg-white">
+                              <option value="전체">전체 회사</option>
+                              {companies.map((c, i) => <option key={i} value={c}>{c}</option>)}
+                            </select>
+                          </div>
+                          <div>
+                            <label className="block text-xs font-bold text-gray-700 mb-1">담당 팀 지정</label>
+                            <select value={mgrForm.allowedTeam} onChange={(e) => setMgrForm({...mgrForm, allowedTeam: e.target.value})} className="w-full p-2 border border-gray-300 rounded text-xs outline-none bg-white">
+                              <option value="전체">전체 팀</option>
+                              {formAvailableTeams.map((t, i) => <option key={i} value={t}>{t}</option>)}
+                            </select>
+                          </div>
+                        </div>
+
+                        <div className="flex justify-end gap-2 pt-2">
+                          {mgrForm.id && (
+                            <button type="button" onClick={() => setMgrForm({ id: null, username: '', password: '', name: '', role: 'team_admin', allowedCompany: '전체', allowedTeam: '전체' })} className="px-3 py-1.5 bg-gray-200 text-gray-700 rounded text-xs font-bold">취소</button>
+                          )}
+                          <button type="submit" className="px-4 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded text-xs font-bold transition-colors">
+                            {mgrForm.id ? '계정 수정 저장' : '계정 추가하기'}
+                          </button>
+                        </div>
+                      </form>
+
+                      {/* 등록된 관리자 계정 리스트 */}
+                      <div>
+                        <h3 className="font-bold text-gray-800 text-sm mb-3">등록된 계정 목록 ({managers.length}개)</h3>
+                        <div className="border border-gray-200 rounded-xl overflow-hidden">
+                          <table className="w-full text-left text-xs">
+                            <thead className="bg-gray-100 border-b border-gray-200">
+                              <tr>
+                                <th className="p-2.5 font-bold">아이디</th>
+                                <th className="p-2.5 font-bold">비밀번호</th>
+                                <th className="p-2.5 font-bold">이름/직함</th>
+                                <th className="p-2.5 font-bold">권한</th>
+                                <th className="p-2.5 font-bold">담당 소속 (회사 / 팀)</th>
+                                <th className="p-2.5 font-bold text-center">관리</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-gray-100">
+                              {managers.map((m) => (
+                                <tr key={m.id} className="hover:bg-gray-50">
+                                  <td className="p-2.5 font-bold text-blue-600">{m.username}</td>
+                                  <td className="p-2.5 text-gray-600 font-mono">{m.password}</td>
+                                  <td className="p-2.5 font-semibold text-gray-800">{m.name}</td>
+                                  <td className="p-2.5">
+                                    <span className={`px-2 py-0.5 rounded font-bold text-[10px] ${m.role === 'master' ? 'bg-amber-100 text-amber-800' : 'bg-blue-100 text-blue-800'}`}>
+                                      {m.role === 'master' ? '마스터' : '팀장(조회전용)'}
+                                    </span>
+                                  </td>
+                                  <td className="p-2.5 text-gray-600 font-medium">
+                                    {m.role === 'master' ? '전체 관리' : `${m.allowedCompany || '전체'} / ${m.allowedTeam || '전체'}`}
+                                  </td>
+                                  <td className="p-2.5 text-center whitespace-nowrap">
+                                    <button onClick={() => setMgrForm(m)} className="text-blue-600 hover:underline mx-1 font-bold">수정</button>
+                                    {m.username !== 'admin' && (
+                                      <button onClick={() => handleDeleteManager(m.id)} className="text-red-500 hover:underline mx-1 font-bold">삭제</button>
+                                    )}
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    </div>
+                    <div className="bg-gray-50 p-4 border-t border-gray-200 flex justify-end">
+                      <button onClick={() => setShowManagerModal(false)} className="px-5 py-2 bg-gray-800 text-white rounded-lg text-xs font-bold hover:bg-gray-900">닫기</button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Add / Edit Employee Info Modal (마스터 전용) */}
+              {(showAddModal || editingEmployee) && currentUser?.role === 'master' && (
                 <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-[60]">
                   <div className="bg-white rounded-2xl w-full max-w-md overflow-hidden shadow-2xl">
                     <div className="bg-blue-600 p-4 text-white flex justify-between items-center">
@@ -1040,56 +1303,58 @@
                       <button onClick={() => setHistoryEmployee(null)} className="text-gray-400 hover:text-white text-2xl"><i className="fa-solid fa-xmark"></i></button>
                     </div>
                     
-                    <div className="p-6 overflow-y-auto flex-1 bg-gray-50">
-                      {/* 신규 기록 추가 폼 */}
-                      <div className="bg-white p-5 rounded-xl border border-blue-200 shadow-sm mb-6">
-                        <h3 className="font-bold text-blue-800 mb-4 flex items-center">
-                          <i className="fa-solid fa-plus-circle mr-2"></i> {recordForm.id ? '기록 수정하기' : '새 연차 기록 추가'}
-                        </h3>
-                        <form onSubmit={handleSaveRecord} className="flex flex-wrap gap-4 items-end">
-                          <div className="flex-1 min-w-[120px]">
-                            <label className="block text-xs font-semibold text-gray-600 mb-1">유형</label>
-                            <select value={recordForm.type} onChange={handleRecordTypeChange} className="w-full p-2 border border-gray-300 rounded-lg outline-none bg-white">
-                              <option value="full">연차</option>
-                              <option value="half">반차 (0.5일)</option>
-                              <option value="replace_full">연차(대체휴일)</option>
-                              <option value="replace_half">반차(대체휴일)</option>
-                            </select>
-                          </div>
-                          <div className="flex-1 min-w-[140px]">
-                            <label className="block text-xs font-semibold text-gray-600 mb-1">시작일</label>
-                            <input type="date" required value={recordForm.startDate} onChange={(e) => handleRecordDateChange('startDate', e.target.value)} className="w-full p-2 border border-gray-300 rounded-lg outline-none" />
-                          </div>
-                          {(recordForm.type === 'full' || recordForm.type === 'replace_full') && (
-                            <div className="flex-1 min-w-[140px]">
-                              <label className="block text-xs font-semibold text-gray-600 mb-1">종료일</label>
-                              <input type="date" required value={recordForm.endDate} min={recordForm.startDate} onChange={(e) => handleRecordDateChange('endDate', e.target.value)} className="w-full p-2 border border-gray-300 rounded-lg outline-none" />
+                    <div className="p-6 overflow-y-auto flex-1 bg-gray-50 space-y-6">
+                      {/* 신규 기록 추가 폼 (마스터 권한일 때만 보임) */}
+                      {currentUser?.role === 'master' && (
+                        <div className="bg-white p-5 rounded-xl border border-blue-200 shadow-sm">
+                          <h3 className="font-bold text-blue-800 mb-4 flex items-center">
+                            <i className="fa-solid fa-plus-circle mr-2"></i> {recordForm.id ? '기록 수정하기' : '새 연차 기록 추가'}
+                          </h3>
+                          <form onSubmit={handleSaveRecord} className="flex flex-wrap gap-4 items-end">
+                            <div className="flex-1 min-w-[120px]">
+                              <label className="block text-xs font-semibold text-gray-600 mb-1">유형</label>
+                              <select value={recordForm.type} onChange={handleRecordTypeChange} className="w-full p-2 border border-gray-300 rounded-lg outline-none bg-white">
+                                <option value="full">연차</option>
+                                <option value="half">반차 (0.5일)</option>
+                                <option value="replace_full">연차(대체휴일)</option>
+                                <option value="replace_half">반차(대체휴일)</option>
+                              </select>
                             </div>
-                          )}
-                          <div className="w-[80px]">
-                            <label className="block text-xs font-semibold text-gray-600 mb-1">차감 일수</label>
-                            <input 
-                              type="number" step="0.5" required 
-                              value={recordForm.days} 
-                              onChange={(e) => setRecordForm({...recordForm, days: (recordForm.type === 'replace_full' || recordForm.type === 'replace_half') ? 0 : Number(e.target.value)})} 
-                              disabled={recordForm.type === 'replace_full' || recordForm.type === 'replace_half'}
-                              className={`w-full p-2 border border-gray-300 rounded-lg outline-none text-center font-bold ${recordForm.type === 'replace_full' || recordForm.type === 'replace_half' ? 'bg-gray-200 text-gray-500' : 'bg-gray-50'}`} 
-                            />
-                          </div>
-                          <div className="flex-[2] min-w-[200px]">
-                            <label className="block text-xs font-semibold text-gray-600 mb-1">사유 (선택)</label>
-                            <input type="text" value={recordForm.memo} onChange={(e) => setRecordForm({...recordForm, memo: e.target.value})} placeholder="여름휴가, 개인사정 등" className="w-full p-2 border border-gray-300 rounded-lg outline-none" />
-                          </div>
-                          <div className="flex gap-2">
-                            {recordForm.id && (
-                              <button type="button" onClick={() => setRecordForm({ id: null, type: 'full', startDate: today, endDate: today, days: 1, memo: '' })} className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg font-bold hover:bg-gray-300">취소</button>
+                            <div className="flex-1 min-w-[140px]">
+                              <label className="block text-xs font-semibold text-gray-600 mb-1">시작일</label>
+                              <input type="date" required value={recordForm.startDate} onChange={(e) => handleRecordDateChange('startDate', e.target.value)} className="w-full p-2 border border-gray-300 rounded-lg outline-none" />
+                            </div>
+                            {(recordForm.type === 'full' || recordForm.type === 'replace_full') && (
+                              <div className="flex-1 min-w-[140px]">
+                                <label className="block text-xs font-semibold text-gray-600 mb-1">종료일</label>
+                                <input type="date" required value={recordForm.endDate} min={recordForm.startDate} onChange={(e) => handleRecordDateChange('endDate', e.target.value)} className="w-full p-2 border border-gray-300 rounded-lg outline-none" />
+                              </div>
                             )}
-                            <button type="submit" className={`px-5 py-2 text-white rounded-lg font-bold shadow-sm ${recordForm.id ? 'bg-green-600 hover:bg-green-700' : 'bg-blue-600 hover:bg-blue-700'}`}>
-                              {recordForm.id ? '수정' : '추가'}
-                            </button>
-                          </div>
-                        </form>
-                      </div>
+                            <div className="w-[80px]">
+                              <label className="block text-xs font-semibold text-gray-600 mb-1">차감 일수</label>
+                              <input 
+                                type="number" step="0.5" required 
+                                value={recordForm.days} 
+                                onChange={(e) => setRecordForm({...recordForm, days: (recordForm.type === 'replace_full' || recordForm.type === 'replace_half') ? 0 : Number(e.target.value)})} 
+                                disabled={recordForm.type === 'replace_full' || recordForm.type === 'replace_half'}
+                                className={`w-full p-2 border border-gray-300 rounded-lg outline-none text-center font-bold ${recordForm.type === 'replace_full' || recordForm.type === 'replace_half' ? 'bg-gray-200 text-gray-500' : 'bg-gray-50'}`} 
+                              />
+                            </div>
+                            <div className="flex-[2] min-w-[200px]">
+                              <label className="block text-xs font-semibold text-gray-600 mb-1">사유 (선택)</label>
+                              <input type="text" value={recordForm.memo} onChange={(e) => setRecordForm({...recordForm, memo: e.target.value})} placeholder="여름휴가, 개인사정 등" className="w-full p-2 border border-gray-300 rounded-lg outline-none" />
+                            </div>
+                            <div className="flex gap-2">
+                              {recordForm.id && (
+                                <button type="button" onClick={() => setRecordForm({ id: null, type: 'full', startDate: today, endDate: today, days: 1, memo: '' })} className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg font-bold hover:bg-gray-300">취소</button>
+                              )}
+                              <button type="submit" className={`px-5 py-2 text-white rounded-lg font-bold shadow-sm ${recordForm.id ? 'bg-green-600 hover:bg-green-700' : 'bg-blue-600 hover:bg-blue-700'}`}>
+                                {recordForm.id ? '수정' : '추가'}
+                              </button>
+                            </div>
+                          </form>
+                        </div>
+                      )}
 
                       {/* 기록 리스트 */}
                       <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
@@ -1105,12 +1370,14 @@
                                 <th className="p-3 font-semibold text-center whitespace-nowrap">유형</th>
                                 <th className="p-3 font-semibold text-center whitespace-nowrap">차감 일수</th>
                                 <th className="p-3 font-semibold whitespace-nowrap">사유</th>
-                                <th className="p-3 font-semibold text-center whitespace-nowrap">관리</th>
+                                {currentUser?.role === 'master' && (
+                                  <th className="p-3 font-semibold text-center whitespace-nowrap">관리</th>
+                                )}
                               </tr>
                             </thead>
                             <tbody className="divide-y divide-gray-100">
                               {(!historyEmployee.leaveRecords || historyEmployee.leaveRecords.length === 0) ? (
-                                <tr><td colSpan="5" className="p-6 text-center text-gray-400">등록된 상세 기록이 없습니다.</td></tr>
+                                <tr><td colSpan={currentUser?.role === 'master' ? 5 : 4} className="p-6 text-center text-gray-400">등록된 상세 기록이 없습니다.</td></tr>
                               ) : (
                                 historyEmployee.leaveRecords.map((record) => (
                                   <tr key={record.id} className="hover:bg-gray-50 transition-colors">
@@ -1128,10 +1395,13 @@
                                       {(record.type === 'replace_full' || record.type === 'replace_half') ? 0 : record.days}일
                                     </td>
                                     <td className="p-3 text-gray-600">{record.memo || '-'}</td>
-                                    <td className="p-3 text-center whitespace-nowrap">
-                                      <button onClick={() => handleEditRecord(record)} className="p-1.5 text-gray-400 hover:text-green-600 mx-1" title="수정"><i className="fa-solid fa-pen text-xs"></i></button>
-                                      <button onClick={() => handleDeleteRecord(record.id)} className="p-1.5 text-gray-400 hover:text-red-600 mx-1" title="삭제"><i className="fa-solid fa-trash text-xs"></i></button>
-                                    </td>
+                                    
+                                    {currentUser?.role === 'master' && (
+                                      <td className="p-3 text-center whitespace-nowrap">
+                                        <button onClick={() => handleEditRecord(record)} className="p-1.5 text-gray-400 hover:text-green-600 mx-1" title="수정"><i className="fa-solid fa-pen text-xs"></i></button>
+                                        <button onClick={() => handleDeleteRecord(record.id)} className="p-1.5 text-gray-400 hover:text-red-600 mx-1" title="삭제"><i className="fa-solid fa-trash text-xs"></i></button>
+                                      </td>
+                                    )}
                                   </tr>
                                 ))
                               )}
@@ -1144,8 +1414,8 @@
                 </div>
               )}
 
-              {/* 소속 관리 모달 */}
-              {showAffiliationModal && (
+              {/* 소속 관리 모달 (마스터 전용) */}
+              {showAffiliationModal && currentUser?.role === 'master' && (
                 <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
                   <div className="bg-white rounded-2xl w-full max-w-lg overflow-hidden shadow-2xl">
                     <div className="bg-gray-800 p-4 text-white flex justify-between items-center">
