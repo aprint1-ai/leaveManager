@@ -72,6 +72,7 @@
       const [user, setUser] = useState(null);
       const [isLoading, setIsLoading] = useState(true);
       const [employees, setEmployees] = useState([]);
+      const [managers, setManagers] = useState([]);
       
       const [currentEmp, setCurrentEmp] = useState(() => {
         const saved = sessionStorage.getItem('leave_app_employee_session');
@@ -94,17 +95,25 @@
         });
       }, []);
 
-      // 2. 직원 정보 실시간 수신
+      // 2. 직원 정보 및 관리자 계정 실시간 수신
       useEffect(() => {
         if (!user) return;
         const empRef = collection(db, 'employees');
-        const unsub = onSnapshot(empRef, (snapshot) => {
+        const unsubEmp = onSnapshot(empRef, (snapshot) => {
           const emps = [];
           snapshot.forEach(d => emps.push({ id: d.id, ...d.data() }));
           setEmployees(emps);
           setIsLoading(false);
         });
-        return () => unsub();
+
+        const mgrRef = collection(db, 'managers');
+        const unsubMgr = onSnapshot(mgrRef, (snapshot) => {
+          const mgrs = [];
+          snapshot.forEach(d => mgrs.push({ id: d.id, ...d.data() }));
+          setManagers(mgrs);
+        });
+
+        return () => { unsubEmp(); unsubMgr(); };
       }, [user]);
 
       // URL 파라미터로 empId가 넘어온 경우 세션 자동 연동
@@ -193,7 +202,7 @@
         return { years, months, generated, label, periodStartStr, periodEndStr, usedPeriodTotal, usedTotalAllTime, remaining };
       }, [myData, today]);
 
-      // 사원 로그인 핸들러
+      // 사원/관리자 통합 로그인 핸들러
       const handleLogin = (e) => {
         e.preventDefault();
         setLoginError('');
@@ -201,20 +210,30 @@
         const inputIdClean = loginIdInput.trim().toLowerCase();
         const inputPwClean = loginPasswordInput.trim().replace(/-/g, '');
 
-        const matched = employees.find(emp => {
+        // 1. 마스터 또는 팀장 계정인 경우 ➔ 관리자 페이지(index.html)로 이동
+        const matchedMgr = managers.find(m => m.username.trim().toLowerCase() === inputIdClean && m.password.trim() === loginPasswordInput.trim());
+        if (matchedMgr) {
+          sessionStorage.setItem('leave_app_manager', JSON.stringify(matchedMgr));
+          setLoginIdInput('');
+          setLoginPasswordInput('');
+          window.location.href = '../index.html';
+          return;
+        }
+
+        // 2. 일반 사원 계정인 경우 ➔ 마이페이지 연동
+        const matchedEmp = employees.find(emp => {
           const expectedId = (emp.loginId || convertHangulToQwerty(emp.name)).toLowerCase();
           const expectedPw = (emp.loginPassword || emp.joinDate.replace(/-/g, '')).replace(/-/g, '');
 
-          // QWERTY 영문 아이디 또는 이름 자체 로그인 허용
           const isIdMatch = (inputIdClean === expectedId) || (inputIdClean === emp.name.toLowerCase());
           const isPwMatch = (inputPwClean === expectedPw);
 
           return isIdMatch && isPwMatch;
         });
 
-        if (matched) {
-          setCurrentEmp(matched);
-          sessionStorage.setItem('leave_app_employee_session', JSON.stringify(matched));
+        if (matchedEmp) {
+          setCurrentEmp(matchedEmp);
+          sessionStorage.setItem('leave_app_employee_session', JSON.stringify(matchedEmp));
           setLoginIdInput('');
           setLoginPasswordInput('');
         } else {
