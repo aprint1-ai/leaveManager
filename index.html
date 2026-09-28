@@ -63,6 +63,29 @@
 
     const { useState, useEffect, useMemo, useRef } = React;
 
+    // 한글 ➔ QWERTY 영문 자판 변환 유틸리티 함수
+    function convertHangulToQwerty(text) {
+      if (!text) return '';
+      const choList = ['r', 'R', 's', 'e', 'E', 'f', 'a', 'q', 'Q', 't', 'T', 'd', 'w', 'W', 'c', 'z', 'x', 'v', 'g'];
+      const jungList = ['k', 'o', 'i', 'O', 'j', 'p', 'u', 'P', 'h', 'hk', 'ho', 'hl', 'y', 'n', 'nj', 'np', 'nl', 'b', 'm', 'ml', 'l'];
+      const jongList = ['', 'r', 'R', 'rt', 's', 'sw', 'sg', 'e', 'f', 'fr', 'fa', 'fq', 'ft', 'fx', 'fv', 'fg', 'a', 'q', 'qt', 't', 'T', 'd', 'w', 'c', 'z', 'x', 'v', 'g'];
+
+      let result = '';
+      for (let i = 0; i < text.length; i++) {
+        const code = text.charCodeAt(i);
+        if (code >= 0xAC00 && code <= 0xD7A3) {
+          const charIndex = code - 0xAC00;
+          const choIndex = Math.floor(charIndex / 588);
+          const jungIndex = Math.floor((charIndex % 588) / 28);
+          const jongIndex = charIndex % 28;
+          result += choList[choIndex] + jungList[jungIndex] + jongList[jongIndex];
+        } else {
+          result += text[i].toLowerCase();
+        }
+      }
+      return result;
+    }
+
     function App() {
       const [user, setUser] = useState(null);
       const [isLoading, setIsLoading] = useState(true);
@@ -112,6 +135,8 @@
 
       const [selectedEmpIds, setSelectedEmpIds] = useState([]);
       const fileInputRef = useRef(null);
+      const attachmentInputRef = useRef(null);
+      const [activeAttachmentRecord, setActiveAttachmentRecord] = useState(null);
 
       const [formData, setFormData] = useState({ 
         name: '', company: '', team: '', joinDate: '', 
@@ -206,15 +231,39 @@
       const handleLogin = (e) => {
         e.preventDefault();
         setLoginError('');
-        const matched = managers.find(m => m.username.trim() === loginUsername.trim() && m.password.trim() === loginPassword.trim());
-        if (matched) {
-          setCurrentUser(matched);
-          sessionStorage.setItem('leave_app_manager', JSON.stringify(matched));
+        
+        const inputIdClean = loginUsername.trim().toLowerCase();
+        const inputPwClean = loginPassword.trim().replace(/-/g, '');
+
+        // 1. 관리자 (마스터 / 팀장) 로그인 체크
+        const matchedMgr = managers.find(m => m.username.trim().toLowerCase() === inputIdClean && m.password.trim() === loginPassword.trim());
+        if (matchedMgr) {
+          setCurrentUser(matchedMgr);
+          sessionStorage.setItem('leave_app_manager', JSON.stringify(matchedMgr));
           setLoginUsername('');
           setLoginPassword('');
-        } else {
-          setLoginError('아이디 또는 비밀번호가 올바르지 않습니다.');
+          return;
         }
+
+        // 2. 일반 사원 로그인 체크 (QWERTY 영문 이름 아이디 & 입사일 8자리 비번)
+        const matchedEmp = employees.find(emp => {
+          const expectedId = (emp.loginId || convertHangulToQwerty(emp.name)).toLowerCase();
+          const expectedPw = (emp.loginPassword || emp.joinDate.replace(/-/g, '')).replace(/-/g, '');
+
+          const isIdMatch = (inputIdClean === expectedId) || (inputIdClean === emp.name.toLowerCase());
+          const isPwMatch = (inputPwClean === expectedPw);
+          return isIdMatch && isPwMatch;
+        });
+
+        if (matchedEmp) {
+          sessionStorage.setItem('leave_app_employee_session', JSON.stringify(matchedEmp));
+          setLoginUsername('');
+          setLoginPassword('');
+          window.location.href = `./mypage/index.html?empId=${matchedEmp.id}`;
+          return;
+        }
+
+        setLoginError('아이디 또는 비밀번호가 올바르지 않습니다.');
       };
 
       const handleLogout = () => {
@@ -530,12 +579,17 @@
         e.preventDefault();
         if (!formData.name || !formData.joinDate) return alert('이름과 입사일을 입력해주세요.');
         const newId = Date.now().toString();
+        const autoLoginId = convertHangulToQwerty(formData.name);
+        const autoLoginPassword = formData.joinDate.replace(/-/g, '');
+
         const newEmployee = { 
           name: formData.name, company: formData.company, team: formData.team, 
           joinDate: formData.joinDate, usedFullDays: 0, usedHalfDays: 0, leaveRecords: [],
-          isResigned: formData.isResigned, resignationDate: formData.resignationDate
+          isResigned: formData.isResigned, resignationDate: formData.resignationDate,
+          loginId: autoLoginId, loginPassword: autoLoginPassword
         };
         await setDoc(doc(db, 'employees', newId), newEmployee);
+        alert(`직원등록이 완료되었습니다!\n• 생성된 사원 아이디: ${autoLoginId}\n• 비밀번호: ${autoLoginPassword}`);
         setShowAddModal(false);
       };
 
@@ -552,10 +606,14 @@
       const handleEditSubmit = async (e) => {
         e.preventDefault();
         if (!editingEmployee) return;
+        const autoLoginId = convertHangulToQwerty(formData.name);
+        const autoLoginPassword = formData.joinDate.replace(/-/g, '');
+
         await setDoc(doc(db, 'employees', editingEmployee.id), {
           name: formData.name, company: formData.company, team: formData.team,
           joinDate: formData.joinDate, usedFullDays: formData.usedFullDays, usedHalfDays: formData.usedHalfDays,
-          isResigned: formData.isResigned, resignationDate: formData.resignationDate
+          isResigned: formData.isResigned, resignationDate: formData.resignationDate,
+          loginId: autoLoginId, loginPassword: autoLoginPassword
         }, { merge: true });
         setEditingEmployee(null);
       };
@@ -659,6 +717,81 @@
         if (recordForm.id === recordId) setRecordForm({ id: null, type: 'full', startDate: today, endDate: today, days: 1, memo: '' });
       };
 
+      // 📎 연차 사용 내역 파일 첨부 및 조회/삭제 핸들러
+      const handleTriggerAttach = (record) => {
+        if (currentUser?.role === 'team_admin') return;
+        setActiveAttachmentRecord(record);
+        if (attachmentInputRef.current) {
+          attachmentInputRef.current.value = '';
+          attachmentInputRef.current.click();
+        }
+      };
+
+      const handleFileSelected = (e) => {
+        const file = e.target.files[0];
+        if (!file || !activeAttachmentRecord || !historyEmployee) return;
+
+        if (file.size > 5 * 1024 * 1024) {
+          return alert("파일 크기는 5MB 이하만 첨부 가능합니다.");
+        }
+
+        const reader = new FileReader();
+        reader.onload = async (evt) => {
+          try {
+            setIsLoading(true);
+            const attachmentObj = {
+              name: file.name,
+              size: file.size,
+              type: file.type,
+              data: evt.target.result,
+              uploadedAt: new Date().toISOString()
+            };
+
+            const latestEmp = employees.find(emp => emp.id === historyEmployee.id) || historyEmployee;
+            const updatedRecords = (latestEmp.leaveRecords || []).map(r => 
+              r.id === activeAttachmentRecord.id ? { ...r, attachment: attachmentObj } : r
+            );
+
+            await setDoc(doc(db, 'employees', historyEmployee.id), { leaveRecords: updatedRecords }, { merge: true });
+            alert(`'${file.name}' 첨부문서가 저장되었습니다.`);
+          } catch (err) {
+            alert('파일 저장 실패: ' + err.message);
+          } finally {
+            setIsLoading(false);
+            setActiveAttachmentRecord(null);
+          }
+        };
+        reader.readAsDataURL(file);
+      };
+
+      const handleRemoveAttachment = async (recordId, fileName) => {
+        if (currentUser?.role === 'team_admin') return;
+        if (!confirm(`'${fileName}' 첨부문서를 삭제하시겠습니까?`)) return;
+        const latestEmp = employees.find(emp => emp.id === historyEmployee.id) || historyEmployee;
+        const updatedRecords = (latestEmp.leaveRecords || []).map(r => {
+          if (r.id === recordId) {
+            const copy = { ...r };
+            delete copy.attachment;
+            return copy;
+          }
+          return r;
+        });
+        await setDoc(doc(db, 'employees', historyEmployee.id), { leaveRecords: updatedRecords }, { merge: true });
+      };
+
+      const handleViewAttachment = (attachment) => {
+        if (!attachment || !attachment.data) return alert('첨부된 파일 데이터가 없습니다.');
+        const win = window.open();
+        if (win) {
+          win.document.write(`<html><head><title>${attachment.name}</title></head><body style="margin:0;"><iframe src="${attachment.data}" frameborder="0" style="width:100vw; height:100vh;"></iframe></body></html>`);
+        } else {
+          const a = document.createElement('a');
+          a.href = attachment.data;
+          a.download = attachment.name;
+          a.click();
+        }
+      };
+
       const getTypeLabel = (type) => {
         if (type === 'half') return '반차';
         if (type === 'replace_full') return '연차(대체)';
@@ -723,7 +856,6 @@
                   <i className="fa-solid fa-lock text-3xl text-white"></i>
                 </div>
                 <h2 className="text-2xl font-extrabold tracking-tight">연차 관리 시스템 로그인</h2>
-                <p className="text-blue-100 text-xs mt-1">부여받으신 계정 정보를 입력해 주세요</p>
               </div>
               <form onSubmit={handleLogin} className="p-6 space-y-4">
                 {loginError && (
@@ -739,7 +871,6 @@
                     required
                     value={loginUsername}
                     onChange={(e) => setLoginUsername(e.target.value)}
-                    placeholder="아이디 입력"
                     className="w-full p-3 border border-gray-300 rounded-lg text-sm outline-none focus:ring-2 focus:ring-blue-500"
                   />
                 </div>
@@ -750,7 +881,6 @@
                     required
                     value={loginPassword}
                     onChange={(e) => setLoginPassword(e.target.value)}
-                    placeholder="비밀번호 입력"
                     className="w-full p-3 border border-gray-300 rounded-lg text-sm outline-none focus:ring-2 focus:ring-blue-500"
                   />
                 </div>
@@ -760,12 +890,6 @@
                 >
                   <i className="fa-solid fa-right-to-bracket"></i> 로그인하기
                 </button>
-
-                <div className="bg-blue-50 border border-blue-100 p-3 rounded-lg text-[11px] text-blue-800 space-y-1">
-                  <p className="font-bold flex items-center"><i className="fa-solid fa-circle-info mr-1"></i> 초기 마스터 계정 정보</p>
-                  <p>• 마스터 ID: <code className="bg-white px-1 py-0.5 rounded font-bold border border-blue-200">admin</code> / PW: <code className="bg-white px-1 py-0.5 rounded font-bold border border-blue-200">1234</code></p>
-                  <p>• 로그인 후 상단 [계정 관리] 메뉴에서 팀장 계정을 새로 추가할 수 있습니다.</p>
-                </div>
               </form>
             </div>
           </div>
@@ -1245,6 +1369,20 @@
                         <label className="block text-sm font-semibold text-gray-700 mb-1">입사일</label>
                         <input type="date" required value={formData.joinDate} onChange={(e) => setFormData({...formData, joinDate: e.target.value})} className="w-full p-2.5 border border-gray-300 rounded-lg outline-none" />
                       </div>
+
+                      {/* 🔑 자동 생성 사원 계정 정보 안내 */}
+                      {formData.name && formData.joinDate && (
+                        <div className="bg-blue-50 border border-blue-200 p-3 rounded-lg text-xs space-y-1">
+                          <div className="font-bold text-blue-900 flex items-center gap-1">
+                            <i className="fa-solid fa-key text-blue-600"></i> 사원 전용 조회 계정 (자동 생성)
+                          </div>
+                          <div className="text-blue-800">
+                            아이디: <code className="bg-white px-1.5 py-0.5 rounded font-mono font-bold border border-blue-200">{convertHangulToQwerty(formData.name)}</code>
+                            {" | "}
+                            비밀번호: <code className="bg-white px-1.5 py-0.5 rounded font-mono font-bold border border-blue-200">{formData.joinDate.replace(/-/g, '')}</code>
+                          </div>
+                        </div>
+                      )}
                       
                       {/* 퇴사 처리 영역 */}
                       <div className="bg-gray-50 p-3 rounded-lg border border-gray-200 mt-2">
@@ -1356,6 +1494,9 @@
                         </div>
                       )}
 
+                      {/* 파일 첨부 전용 숨김 인풋 */}
+                      <input type="file" ref={attachmentInputRef} onChange={handleFileSelected} className="hidden" accept=".pdf,image/*,.docx,.xlsx,.pptx,.hwp" />
+
                       {/* 기록 리스트 */}
                       <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
                         <div className="bg-gray-100 p-3 border-b border-gray-200 flex justify-between items-center">
@@ -1370,14 +1511,12 @@
                                 <th className="p-3 font-semibold text-center whitespace-nowrap">유형</th>
                                 <th className="p-3 font-semibold text-center whitespace-nowrap">차감 일수</th>
                                 <th className="p-3 font-semibold whitespace-nowrap">사유</th>
-                                {currentUser?.role === 'master' && (
-                                  <th className="p-3 font-semibold text-center whitespace-nowrap">관리</th>
-                                )}
+                                <th className="p-3 font-semibold text-center whitespace-nowrap">{currentUser?.role === 'master' ? '관리 / 첨부' : '첨부 문서'}</th>
                               </tr>
                             </thead>
                             <tbody className="divide-y divide-gray-100">
                               {(!historyEmployee.leaveRecords || historyEmployee.leaveRecords.length === 0) ? (
-                                <tr><td colSpan={currentUser?.role === 'master' ? 5 : 4} className="p-6 text-center text-gray-400">등록된 상세 기록이 없습니다.</td></tr>
+                                <tr><td colSpan="5" className="p-6 text-center text-gray-400">등록된 상세 기록이 없습니다.</td></tr>
                               ) : (
                                 historyEmployee.leaveRecords.map((record) => (
                                   <tr key={record.id} className="hover:bg-gray-50 transition-colors">
@@ -1396,12 +1535,35 @@
                                     </td>
                                     <td className="p-3 text-gray-600">{record.memo || '-'}</td>
                                     
-                                    {currentUser?.role === 'master' && (
-                                      <td className="p-3 text-center whitespace-nowrap">
-                                        <button onClick={() => handleEditRecord(record)} className="p-1.5 text-gray-400 hover:text-green-600 mx-1" title="수정"><i className="fa-solid fa-pen text-xs"></i></button>
-                                        <button onClick={() => handleDeleteRecord(record.id)} className="p-1.5 text-gray-400 hover:text-red-600 mx-1" title="삭제"><i className="fa-solid fa-trash text-xs"></i></button>
-                                      </td>
-                                    )}
+                                    <td className="p-3 text-center whitespace-nowrap">
+                                      {currentUser?.role === 'master' && (
+                                        <>
+                                          <button onClick={() => handleEditRecord(record)} className="p-1.5 text-gray-400 hover:text-green-600 mx-1" title="수정"><i className="fa-solid fa-pen text-xs"></i></button>
+                                          <button onClick={() => handleDeleteRecord(record.id)} className="p-1.5 text-gray-400 hover:text-red-600 mx-1" title="삭제"><i className="fa-solid fa-trash text-xs"></i></button>
+                                        </>
+                                      )}
+
+                                      {/* 📎 파일 첨부 버튼 (아이콘들 우측에 위치) */}
+                                      {record.attachment ? (
+                                        <span className="inline-flex items-center space-x-1 ml-1 bg-blue-50 border border-blue-200 px-2 py-1 rounded text-xs">
+                                          <button onClick={() => handleViewAttachment(record.attachment)} className="text-blue-700 font-bold hover:underline flex items-center gap-1" title={`첨부문서 열기: ${record.attachment.name}`}>
+                                            <i className="fa-solid fa-file-pdf text-red-500 text-xs"></i>
+                                            <span className="max-w-[90px] truncate">{record.attachment.name}</span>
+                                          </button>
+                                          {currentUser?.role === 'master' && (
+                                            <button onClick={() => handleRemoveAttachment(record.id, record.attachment.name)} className="text-gray-400 hover:text-red-600 ml-1" title="첨부 삭제"><i className="fa-solid fa-xmark text-xs"></i></button>
+                                          )}
+                                        </span>
+                                      ) : (
+                                        currentUser?.role === 'master' ? (
+                                          <button onClick={() => handleTriggerAttach(record)} className="p-1.5 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-md mx-1 transition-colors" title="PDF/문서 첨부하기">
+                                            <i className="fa-solid fa-paperclip text-xs"></i>
+                                          </button>
+                                        ) : (
+                                          <span className="text-gray-300 text-xs">-</span>
+                                        )
+                                      )}
+                                    </td>
                                   </tr>
                                 ))
                               )}
