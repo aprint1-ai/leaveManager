@@ -1,0 +1,907 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>대체휴무 관리 시스템 - 푸드윈 홀딩스</title>
+  
+  <!-- CSS 및 아이콘 불러오기 -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  
+  <!-- React 및 Babel 불러오기 -->
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <style>
+    body { font-family: 'Malgun Gothic', 'Apple SD Gothic Neo', sans-serif; background-color: #f8fafc; }
+    .scrollbar-hide::-webkit-scrollbar { display: none; }
+    .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
+
+    /* 🖨️ 인쇄 전용 스타일 (평소엔 숨김, 인쇄시에만 보임) */
+    @media print {
+      @page { margin: 0; size: A4 portrait; } 
+      body { background-color: white; margin: 0; padding: 0; } 
+      .print-hide { display: none !important; }
+      .print-show { display: block !important; }
+      .page-break { 
+        page-break-after: always; 
+        padding: 15mm; 
+        box-sizing: border-box;
+      }
+      .avoid-break { page-break-inside: avoid; }
+    }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel" data-type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-app.js";
+    import { getAuth, signInAnonymously } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-auth.js";
+    import { getFirestore, collection, onSnapshot, doc, setDoc } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-firestore.js";
+
+    const firebaseConfig = {
+      apiKey: "AIzaSyC4ltCdiOULVX_WsNFO1k54t2lTc69JcFI",
+      authDomain: "leavemanager-98009.firebaseapp.com",
+      projectId: "leavemanager-98009",
+      storageBucket: "leavemanager-98009.firebasestorage.app",
+      messagingSenderId: "305739969906",
+      appId: "1:305739969906:web:93033e6d43ae30fa92d9eb"
+    };
+
+    const app = initializeApp(firebaseConfig);
+    const auth = getAuth(app);
+    const db = getFirestore(app);
+
+    const { useState, useEffect, useMemo } = React;
+
+    function convertHangulToQwerty(text) {
+      if (!text) return '';
+      const choList = ['r', 'R', 's', 'e', 'E', 'f', 'a', 'q', 'Q', 't', 'T', 'd', 'w', 'W', 'c', 'z', 'x', 'v', 'g'];
+      const jungList = ['k', 'o', 'i', 'O', 'j', 'p', 'u', 'P', 'h', 'hk', 'ho', 'hl', 'y', 'n', 'nj', 'np', 'nl', 'b', 'm', 'ml', 'l'];
+      const jongList = ['', 'r', 'R', 'rt', 's', 'sw', 'sg', 'e', 'f', 'fr', 'fa', 'fq', 'ft', 'fx', 'fv', 'fg', 'a', 'q', 'qt', 't', 'T', 'd', 'w', 'c', 'z', 'x', 'v', 'g'];
+
+      let result = '';
+      for (let i = 0; i < text.length; i++) {
+        const code = text.charCodeAt(i);
+        if (code >= 0xAC00 && code <= 0xD7A3) {
+          const charIndex = code - 0xAC00;
+          const choIndex = Math.floor(charIndex / 588);
+          const jungIndex = Math.floor((charIndex % 588) / 28);
+          const jongIndex = charIndex % 28;
+          result += choList[choIndex] + jungList[jungIndex] + jongList[jongIndex];
+        } else {
+          result += text[i].toLowerCase();
+        }
+      }
+      return result;
+    }
+
+    function App() {
+      const [user, setUser] = useState(null);
+      const [isLoading, setIsLoading] = useState(true);
+      const [employees, setEmployees] = useState([]);
+      const [managers, setManagers] = useState([]);
+      const [companies, setCompanies] = useState([]);
+      const [teams, setTeams] = useState([]);
+
+      const [currentUser, setCurrentUser] = useState(() => {
+        const saved = sessionStorage.getItem('leave_app_manager');
+        return saved ? JSON.parse(saved) : null;
+      });
+
+      const [loginUsername, setLoginUsername] = useState('');
+      const [loginPassword, setLoginPassword] = useState('');
+      const [loginError, setLoginError] = useState('');
+
+      // 검색 및 필터 상태
+      const [searchName, setSearchName] = useState('');
+      const [selectedCompany, setSelectedCompany] = useState('전체');
+      const [selectedTeam, setSelectedTeam] = useState('전체');
+
+      // 모달 상태
+      const [showAddModal, setShowAddModal] = useState(false);
+      const [showHistoryModal, setShowHistoryModal] = useState(false);
+      const [selectedEmp, setSelectedEmp] = useState(null);
+
+      // 대체휴무 등록 폼
+      const [recordForm, setRecordForm] = useState({
+        type: 'grant', // grant, use, pay
+        date: new Date().toISOString().split('T')[0],
+        days: 0.5,
+        memo: '',
+        attachment: null
+      });
+
+      // 1. 익명 로그인
+      useEffect(() => {
+        signInAnonymously(auth).then(u => setUser(u.user)).catch(err => console.error(err));
+      }, []);
+
+      // 2. 파이어베이스 데이터 수신
+      useEffect(() => {
+        if (!user) return;
+        const unsubEmp = onSnapshot(collection(db, 'employees'), (snapshot) => {
+          const emps = [];
+          snapshot.forEach(d => emps.push({ id: d.id, ...d.data() }));
+          setEmployees(emps);
+          setIsLoading(false);
+        });
+
+        const unsubMgr = onSnapshot(collection(db, 'managers'), (snapshot) => {
+          const mgrs = [];
+          snapshot.forEach(d => mgrs.push({ id: d.id, ...d.data() }));
+          setManagers(mgrs);
+        });
+
+        const unsubMeta = onSnapshot(doc(db, 'settings', 'metadata'), (snapshot) => {
+          if (snapshot.exists()) {
+            const data = snapshot.data();
+            setCompanies(data.companies || []);
+            setTeams(data.teams || []);
+          }
+        });
+
+        return () => { unsubEmp(); unsubMgr(); unsubMeta(); };
+      }, [user]);
+
+      // 선택된 직원 데이터 실시간 동기화
+      useEffect(() => {
+        if (selectedEmp) {
+          const updated = employees.find(e => e.id === selectedEmp.id);
+          if (updated) setSelectedEmp(updated);
+        }
+      }, [employees]);
+
+      // 팀장 로그인 시 소속 고정
+      useEffect(() => {
+        if (currentUser && currentUser.role === 'team_admin') {
+          if (currentUser.allowedCompany && currentUser.allowedCompany !== '전체') {
+            setSelectedCompany(currentUser.allowedCompany);
+          }
+          if (currentUser.allowedTeam && currentUser.allowedTeam !== '전체') {
+            setSelectedTeam(currentUser.allowedTeam);
+          }
+        }
+      }, [currentUser]);
+
+      // 로그인 처리
+      const handleLogin = (e) => {
+        e.preventDefault();
+        setLoginError('');
+        const inputIdClean = loginUsername.trim().toLowerCase();
+        const inputPwClean = loginPassword.trim().replace(/-/g, '');
+
+        const matchedMgr = managers.find(m => m.username.trim().toLowerCase() === inputIdClean && m.password.trim() === loginPassword.trim());
+        if (matchedMgr) {
+          setCurrentUser(matchedMgr);
+          sessionStorage.setItem('leave_app_manager', JSON.stringify(matchedMgr));
+          setLoginUsername('');
+          setLoginPassword('');
+          return;
+        }
+
+        const matchedEmp = employees.find(emp => {
+          const expectedId = (emp.loginId || convertHangulToQwerty(emp.name)).toLowerCase();
+          const expectedPw = (emp.loginPassword || emp.joinDate.replace(/-/g, '')).replace(/-/g, '');
+          return ((inputIdClean === expectedId) || (inputIdClean === emp.name.toLowerCase())) && (inputPwClean === expectedPw);
+        });
+
+        if (matchedEmp) {
+          sessionStorage.setItem('leave_app_employee_session', JSON.stringify(matchedEmp));
+          window.location.href = `../mypage/index.html?empId=${matchedEmp.id}`;
+          return;
+        }
+
+        setLoginError('아이디 또는 비밀번호가 올바르지 않습니다.');
+      };
+
+      const handleLogout = () => {
+        setCurrentUser(null);
+        sessionStorage.removeItem('leave_app_manager');
+      };
+
+      // 대체휴무 계산 데이터
+      const computedEmployees = useMemo(() => {
+        return employees.map(emp => {
+          const records = emp.dayoffRecords || [];
+          const granted = records.filter(r => r.type === 'grant').reduce((sum, r) => sum + Number(r.days || 0), 0);
+          const used = records.filter(r => r.type === 'use').reduce((sum, r) => sum + Number(r.days || 0), 0);
+          const paid = records.filter(r => r.type === 'pay').reduce((sum, r) => sum + Number(r.days || 0), 0);
+          const remaining = Math.max(0, granted - used - paid);
+
+          return {
+            ...emp,
+            dayoffStats: { granted, used, paid, remaining }
+          };
+        });
+      }, [employees]);
+
+      // 필터링된 직원 목록
+      const filteredEmployees = useMemo(() => {
+        return computedEmployees.filter(emp => {
+          if (currentUser?.role === 'team_admin') {
+            if (currentUser.allowedCompany !== '전체' && emp.company !== currentUser.allowedCompany) return false;
+            if (currentUser.allowedTeam !== '전체' && emp.team !== currentUser.allowedTeam) return false;
+          }
+
+          if (selectedCompany !== '전체' && emp.company !== selectedCompany) return false;
+          if (selectedTeam !== '전체' && emp.team !== selectedTeam) return false;
+          if (searchName && !emp.name.toLowerCase().includes(searchName.trim().toLowerCase())) return false;
+          return true;
+        });
+      }, [computedEmployees, selectedCompany, selectedTeam, searchName, currentUser]);
+
+      // 🔐 선택된 직원 아이디 목록 (인쇄용)
+      const [selectedEmpIds, setSelectedEmpIds] = useState([]);
+
+      const handleSelectAll = (e) => {
+        if (e.target.checked) {
+          setSelectedEmpIds(filteredEmployees.map(emp => emp.id));
+        } else {
+          setSelectedEmpIds([]);
+        }
+      };
+
+      const handleToggleSelect = (empId) => {
+        setSelectedEmpIds(prev => 
+          prev.includes(empId) ? prev.filter(id => id !== empId) : [...prev, empId]
+        );
+      };
+
+      const handlePrint = () => {
+        if (selectedEmpIds.length === 0) return alert('인쇄할 직원을 먼저 체크박스로 선택해주세요.');
+        const selectedNames = filteredEmployees.filter(emp => selectedEmpIds.includes(emp.id)).map(emp => emp.name);
+        const printTitle = `${selectedNames.join('_')} 대체휴무내역`;
+        const originalTitle = document.title;
+        
+        document.title = printTitle;
+        window.onafterprint = () => {
+          document.title = originalTitle;
+          window.onafterprint = null;
+        };
+        window.print();
+      };
+
+      // Overall Summary KPI
+      const overallKpi = useMemo(() => {
+        return filteredEmployees.reduce((acc, emp) => {
+          acc.granted += emp.dayoffStats.granted;
+          acc.used += emp.dayoffStats.used;
+          acc.paid += emp.dayoffStats.paid;
+          acc.remaining += emp.dayoffStats.remaining;
+          return acc;
+        }, { granted: 0, used: 0, paid: 0, remaining: 0 });
+      }, [filteredEmployees]);
+
+      // 파일 첨부 처리 (Base64)
+      const handleFileUpload = (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        if (file.size > 5 * 1024 * 1024) {
+          alert('파일 크기는 5MB 이하만 가능합니다.');
+          e.target.value = '';
+          return;
+        }
+        const reader = new FileReader();
+        reader.onload = (event) => {
+          setRecordForm(prev => ({
+            ...prev,
+            attachment: {
+              name: file.name,
+              type: file.type,
+              data: event.target.result
+            }
+          }));
+        };
+        reader.readAsDataURL(file);
+      };
+
+      // 대체휴무 내역 추가
+      const handleAddRecord = async (e) => {
+        e.preventDefault();
+        if (!selectedEmp) return;
+        if (!recordForm.days || recordForm.days <= 0) return alert('올바른 일수를 입력해주세요.');
+        if (!recordForm.date) return alert('날짜를 선택해주세요.');
+
+        // 잔여 수량 체크 (사용/지불 시)
+        if (recordForm.type === 'use' || recordForm.type === 'pay') {
+          if (Number(recordForm.days) > selectedEmp.dayoffStats.remaining) {
+            if (!confirm(`현재 잔여 대체휴무(${selectedEmp.dayoffStats.remaining}일)보다 입력한 일수(${recordForm.days}일)가 큽니다. 계속 진행하시겠습니까?`)) {
+              return;
+            }
+          }
+        }
+
+        const newRecord = {
+          id: Date.now().toString(),
+          type: recordForm.type,
+          date: recordForm.date,
+          days: Number(recordForm.days),
+          memo: recordForm.memo.trim(),
+          attachment: recordForm.attachment || null,
+          createdAt: new Date().toISOString()
+        };
+
+        const updatedRecords = [newRecord, ...(selectedEmp.dayoffRecords || [])];
+        
+        await setDoc(doc(db, 'employees', selectedEmp.id), {
+          ...selectedEmp,
+          dayoffRecords: updatedRecords
+        }, { merge: true });
+
+        alert('대체휴무 내역이 등록되었습니다.');
+        setShowAddModal(false);
+        setRecordForm({
+          type: 'grant',
+          date: new Date().toISOString().split('T')[0],
+          days: 0.5,
+          memo: '',
+          attachment: null
+        });
+      };
+
+      // 대체휴무 내역 삭제
+      const handleDeleteRecord = async (recordId) => {
+        if (!selectedEmp) return;
+        if (!confirm('이 대체휴무 기록을 삭제하시겠습니까?')) return;
+
+        const updatedRecords = (selectedEmp.dayoffRecords || []).filter(r => r.id !== recordId);
+        await setDoc(doc(db, 'employees', selectedEmp.id), {
+          ...selectedEmp,
+          dayoffRecords: updatedRecords
+        }, { merge: true });
+
+        alert('기록이 삭제되었습니다.');
+      };
+
+      // 첨부파일 보기
+      const handleViewAttachment = (attachment) => {
+        if (!attachment || !attachment.data) return alert('첨부파일이 없습니다.');
+        const win = window.open();
+        if (win) {
+          win.document.write(`<html><head><title>${attachment.name}</title></head><body style="margin:0;"><iframe src="${attachment.data}" frameborder="0" style="width:100vw; height:100vh;"></iframe></body></html>`);
+        } else {
+          const a = document.createElement('a');
+          a.href = attachment.data;
+          a.download = attachment.name;
+          a.click();
+        }
+      };
+
+      const getTypeBadge = (type) => {
+        if (type === 'grant') return <span className="bg-emerald-100 text-emerald-800 text-xs px-2.5 py-1 rounded-md font-bold">부여 (+휴가)</span>;
+        if (type === 'use') return <span className="bg-amber-100 text-amber-800 text-xs px-2.5 py-1 rounded-md font-bold">휴가 사용</span>;
+        if (type === 'pay') return <span className="bg-indigo-100 text-indigo-800 text-xs px-2.5 py-1 rounded-md font-bold">수당 지불</span>;
+        return null;
+      };
+
+      if (isLoading) {
+        return (
+          <div className="min-h-screen bg-slate-900 flex flex-col items-center justify-center space-y-4">
+            <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-purple-500"></div>
+            <p className="text-slate-400 font-medium">대체휴무 관리 시스템 로딩 중...</p>
+          </div>
+        );
+      }
+
+      // 관리자 로그인 화면
+      if (!currentUser) {
+        return (
+          <div className="min-h-screen bg-slate-900 flex items-center justify-center p-4 font-sans">
+            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden border border-slate-700">
+              <div className="bg-purple-600 p-6 text-white text-center">
+                <div className="bg-white/20 w-16 h-16 rounded-2xl flex items-center justify-center mx-auto mb-3 backdrop-blur-sm">
+                  <i className="fa-solid fa-calendar-check text-3xl text-white"></i>
+                </div>
+                <h2 className="text-2xl font-extrabold tracking-tight">대체휴무 관리 로그인</h2>
+              </div>
+              <form onSubmit={handleLogin} className="p-6 space-y-4">
+                {loginError && (
+                  <div className="bg-red-50 border border-red-200 text-red-600 text-xs p-3 rounded-lg flex items-center font-bold">
+                    <i className="fa-solid fa-triangle-exclamation mr-2 text-sm"></i>
+                    {loginError}
+                  </div>
+                )}
+                <div>
+                  <label className="block text-xs font-bold text-gray-700 mb-1">아이디 (ID)</label>
+                  <input
+                    type="text"
+                    required
+                    value={loginUsername}
+                    onChange={(e) => setLoginUsername(e.target.value)}
+                    className="w-full p-3 border border-gray-300 rounded-lg text-sm outline-none focus:ring-2 focus:ring-purple-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-gray-700 mb-1">비밀번호</label>
+                  <input
+                    type="password"
+                    required
+                    value={loginPassword}
+                    onChange={(e) => setLoginPassword(e.target.value)}
+                    className="w-full p-3 border border-gray-300 rounded-lg text-sm outline-none focus:ring-2 focus:ring-purple-500"
+                  />
+                </div>
+                <button
+                  type="submit"
+                  className="w-full bg-purple-600 hover:bg-purple-700 text-white font-bold py-3 rounded-lg shadow-md transition-colors text-sm flex items-center justify-center gap-2"
+                >
+                  <i className="fa-solid fa-right-to-bracket"></i> 로그인하기
+                </button>
+              </form>
+            </div>
+          </div>
+        );
+      }
+
+      return (
+        <>
+          {/* 🖨️ 인쇄 전용 화면 (대체휴무 상세 내역) */}
+          <div className="hidden print-show w-full bg-white text-black text-sm">
+            {filteredEmployees.filter(emp => selectedEmpIds.includes(emp.id)).map((emp) => (
+              <div key={emp.id} className="page-break">
+                <div className="border-b-2 border-gray-800 pb-3 mb-4">
+                  <h2 className="text-2xl font-bold mb-2">{emp.name} 대체휴무 상세 내역 {emp.isResigned && '(퇴사자)'}</h2>
+                  <div className="flex justify-between text-gray-700 font-semibold text-xs">
+                    <span>소속: {emp.company || '-'} {emp.team || '-'}</span>
+                    <span>입사일: {emp.joinDate} {emp.isResigned && ` / 퇴사일: ${emp.resignationDate}`}</span>
+                    <span>누적 부여: {emp.dayoffStats.granted}일</span>
+                    <span>휴가 사용: {emp.dayoffStats.used}일</span>
+                    <span>수당 지불: {emp.dayoffStats.paid}일</span>
+                    <span className="text-purple-700 font-bold">잔여 대체휴무: {emp.dayoffStats.remaining}일</span>
+                  </div>
+                </div>
+                
+                <table className="w-full border-collapse border border-gray-300 text-xs">
+                  <thead>
+                    <tr className="bg-gray-100 text-center">
+                      <th className="border border-gray-300 p-2 w-1/4">날짜</th>
+                      <th className="border border-gray-300 p-2 w-1/6">구분</th>
+                      <th className="border border-gray-300 p-2 w-1/6">일수</th>
+                      <th className="border border-gray-300 p-2 w-5/12">사유 및 메모</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(!emp.dayoffRecords || emp.dayoffRecords.length === 0) ? (
+                      <tr><td colSpan="4" className="p-4 text-center text-gray-500">등록된 대체휴무 상세 기록이 없습니다.</td></tr>
+                    ) : (
+                      emp.dayoffRecords.map(record => (
+                        <tr key={record.id} className="text-center avoid-break">
+                          <td className="border border-gray-300 p-2 font-mono">{record.date}</td>
+                          <td className="border border-gray-300 p-2 font-bold">
+                            {record.type === 'grant' && '부여 (+휴가)'}
+                            {record.type === 'use' && '휴가 사용'}
+                            {record.type === 'pay' && '수당 지불'}
+                          </td>
+                          <td className="border border-gray-300 p-2 font-bold">{record.days}일</td>
+                          <td className="border border-gray-300 p-2 text-left px-3">{record.memo || '-'}</td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            ))}
+          </div>
+
+          {/* 메인 어플리케이션 화면 */}
+          <div className="print-hide min-h-screen bg-slate-50 p-4 md:p-8 font-sans text-slate-800">
+            <div className="max-w-6xl mx-auto space-y-6">
+              
+              {/* Header */}
+              <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-5 flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+                <div className="flex items-center space-x-3 shrink-0">
+                  <div className="bg-purple-600 p-2.5 rounded-2xl text-white shadow-md shrink-0">
+                    <i className="fa-solid fa-calendar-check text-xl"></i>
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <h1 className="text-lg md:text-xl font-extrabold text-slate-900 whitespace-nowrap">대체휴무 관리 시스템</h1>
+                      <span className="bg-purple-100 text-purple-800 text-[11px] px-2.5 py-0.5 rounded-full font-bold whitespace-nowrap">주말/휴일 근무 전용</span>
+                    </div>
+                    <p className="text-xs text-slate-500 font-medium mt-0.5 whitespace-nowrap">
+                      담당자: <span className="font-bold text-slate-700">{currentUser.name}</span> ({currentUser.role === 'master' ? '총괄 마스터' : '팀장'})
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2 flex-wrap">
+                  <a href="../index.html" className="bg-blue-600 hover:bg-blue-700 text-white px-3 py-2 rounded-lg text-xs font-bold transition-colors flex items-center gap-1.5 shadow-sm whitespace-nowrap">
+                    <i className="fa-solid fa-arrow-left"></i> 연차 관리 보드로
+                  </a>
+                  <button onClick={handleLogout} className="bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-2 rounded-lg text-xs font-bold transition-colors flex items-center gap-1.5 whitespace-nowrap">
+                    <i className="fa-solid fa-right-from-bracket text-slate-500"></i> 로그아웃
+                  </button>
+                </div>
+              </div>
+
+              {/* KPI 요약 카드는 대체휴무 전용 */}
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm">
+                  <div className="flex justify-between items-center text-slate-400 mb-2">
+                    <span className="text-xs font-bold text-slate-500">누적 부여 대체휴무</span>
+                    <i className="fa-solid fa-plus-circle text-emerald-500"></i>
+                  </div>
+                  <div className="text-3xl font-black text-emerald-600">{overallKpi.granted}<span className="text-sm font-bold ml-1 text-slate-600">일</span></div>
+                  <div className="text-[11px] text-slate-400 mt-1">주말/휴일 근무로 발생한 총 휴가</div>
+                </div>
+
+                <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm">
+                  <div className="flex justify-between items-center text-slate-400 mb-2">
+                    <span className="text-xs font-bold text-slate-500">휴가 사용</span>
+                    <i className="fa-solid fa-plane-departure text-amber-500"></i>
+                  </div>
+                  <div className="text-3xl font-black text-amber-600">{overallKpi.used}<span className="text-sm font-bold ml-1 text-slate-600">일</span></div>
+                  <div className="text-[11px] text-slate-400 mt-1">대체휴무로 사용한 휴가 일수</div>
+                </div>
+
+                <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm">
+                  <div className="flex justify-between items-center text-slate-400 mb-2">
+                    <span className="text-xs font-bold text-slate-500">수당 지불</span>
+                    <i className="fa-solid fa-hand-holding-dollar text-indigo-500"></i>
+                  </div>
+                  <div className="text-3xl font-black text-indigo-600">{overallKpi.paid}<span className="text-sm font-bold ml-1 text-slate-600">일</span></div>
+                  <div className="text-[11px] text-slate-400 mt-1">돈(수당)으로 정산 완료된 일수</div>
+                </div>
+
+                <div className="bg-gradient-to-br from-purple-600 to-indigo-700 p-5 rounded-2xl text-white shadow-md">
+                  <div className="flex justify-between items-center text-purple-200 mb-2">
+                    <span className="text-xs font-bold text-purple-100">총 잔여 대체휴무</span>
+                    <i className="fa-solid fa-clock text-amber-300 text-lg"></i>
+                  </div>
+                  <div className="text-4xl font-black tracking-tight text-white">{overallKpi.remaining}<span className="text-base font-bold ml-1 text-purple-200">일</span></div>
+                  <div className="text-[11px] text-purple-100 mt-1">부여 - (사용 + 지불)</div>
+                </div>
+              </div>
+
+              {/* 필터 및 직원 목록 */}
+              <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 space-y-4">
+                <div className="flex flex-col md:flex-row justify-between items-center gap-4">
+                  <h2 className="text-lg font-bold text-slate-800 flex items-center gap-2">
+                    <i className="fa-solid fa-users text-purple-600"></i>
+                    직원별 대체휴무 관리 현황
+                    <span className="text-xs bg-purple-100 text-purple-800 px-2.5 py-0.5 rounded-full font-bold">
+                      총 {filteredEmployees.length}명
+                    </span>
+                  </h2>
+
+                  <div className="flex items-center gap-2 flex-wrap w-full md:w-auto">
+                    <select
+                      value={selectedCompany}
+                      onChange={(e) => setSelectedCompany(e.target.value)}
+                      disabled={currentUser?.role === 'team_admin' && currentUser.allowedCompany !== '전체'}
+                      className="p-2 border border-slate-300 rounded-lg text-xs font-bold text-slate-700 outline-none"
+                    >
+                      <option value="전체">전체 회사</option>
+                      {companies.map(c => <option key={c} value={c}>{c}</option>)}
+                    </select>
+
+                    <select
+                      value={selectedTeam}
+                      onChange={(e) => setSelectedTeam(e.target.value)}
+                      disabled={currentUser?.role === 'team_admin' && currentUser.allowedTeam !== '전체'}
+                      className="p-2 border border-slate-300 rounded-lg text-xs font-bold text-slate-700 outline-none"
+                    >
+                      <option value="전체">전체 팀</option>
+                      {teams.map(t => <option key={t} value={t}>{t}</option>)}
+                    </select>
+
+                    <input
+                      type="text"
+                      placeholder="이름 검색..."
+                      value={searchName}
+                      onChange={(e) => setSearchName(e.target.value)}
+                      className="p-2 border border-slate-300 rounded-lg text-xs outline-none focus:ring-2 focus:ring-purple-500"
+                    />
+
+                    <button
+                      onClick={handlePrint}
+                      className="bg-purple-600 hover:bg-purple-700 text-white px-3 py-2 rounded-lg text-xs font-bold flex items-center whitespace-nowrap transition-colors shadow-sm"
+                      title="선택한 직원의 대체휴무 상세 내역 인쇄 / PDF 저장"
+                    >
+                      <i className="fa-solid fa-print mr-1.5"></i>
+                      선택 인쇄
+                      {selectedEmpIds.length > 0 && (
+                        <span className="bg-white text-purple-800 rounded-full px-2 py-0.5 ml-1.5 text-[11px] font-extrabold">
+                          {selectedEmpIds.length}명
+                        </span>
+                      )}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-sm">
+                    <thead className="bg-slate-50 border-b border-slate-200 text-slate-500">
+                      <tr>
+                        <th className="p-3 w-10 text-center">
+                          <input
+                            type="checkbox"
+                            onChange={handleSelectAll}
+                            checked={filteredEmployees.length > 0 && selectedEmpIds.length === filteredEmployees.length}
+                            className="rounded border-slate-300 text-purple-600 focus:ring-purple-500 cursor-pointer w-4 h-4"
+                          />
+                        </th>
+                        <th className="p-3 font-semibold">이름</th>
+                        <th className="p-3 font-semibold">소속</th>
+                        <th className="p-3 font-semibold">입사일</th>
+                        <th className="p-3 font-semibold text-center">누적 부여</th>
+                        <th className="p-3 font-semibold text-center">휴가 사용</th>
+                        <th className="p-3 font-semibold text-center">수당 지불</th>
+                        <th className="p-3 font-semibold text-center">잔여 대체휴무</th>
+                        <th className="p-3 font-semibold text-center">작업</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {filteredEmployees.length === 0 ? (
+                        <tr><td colSpan="9" className="p-8 text-center text-slate-400 font-medium">검색 조건에 해당되는 직원이 없습니다.</td></tr>
+                      ) : (
+                        filteredEmployees.map(emp => (
+                          <tr key={emp.id} className="hover:bg-slate-50 transition-colors">
+                            <td className="p-3 text-center">
+                              <input
+                                type="checkbox"
+                                checked={selectedEmpIds.includes(emp.id)}
+                                onChange={() => handleToggleSelect(emp.id)}
+                                className="rounded border-slate-300 text-purple-600 focus:ring-purple-500 cursor-pointer w-4 h-4"
+                              />
+                            </td>
+                            <td className="p-3 font-bold text-slate-800">
+                              {emp.name}
+                              {emp.isResigned && <span className="ml-2 text-[10px] bg-red-100 text-red-600 px-1.5 py-0.5 rounded font-bold">퇴사</span>}
+                            </td>
+                          <td className="p-3 text-xs text-slate-600">
+                            <span className="font-semibold text-slate-700">{emp.company || '-'}</span> / {emp.team || '-'}
+                          </td>
+                          <td className="p-3 text-xs text-slate-500 font-mono">{emp.joinDate}</td>
+                          <td className="p-3 text-center font-bold text-emerald-600">{emp.dayoffStats.granted}일</td>
+                          <td className="p-3 text-center font-bold text-amber-600">{emp.dayoffStats.used}일</td>
+                          <td className="p-3 text-center font-bold text-indigo-600">{emp.dayoffStats.paid}일</td>
+                          <td className="p-3 text-center">
+                            <span className={`px-2.5 py-1 rounded-full text-xs font-black ${emp.dayoffStats.remaining > 0 ? 'bg-purple-100 text-purple-800' : 'bg-slate-100 text-slate-500'}`}>
+                              {emp.dayoffStats.remaining}일
+                            </span>
+                          </td>
+                          <td className="p-3 text-center">
+                            <div className="flex items-center justify-center gap-1.5">
+                              {currentUser?.role === 'master' && (
+                                <button
+                                  onClick={() => {
+                                    setSelectedEmp(emp);
+                                    setShowAddModal(true);
+                                  }}
+                                  className="bg-purple-50 hover:bg-purple-100 text-purple-700 border border-purple-200 px-2.5 py-1.5 rounded-lg text-xs font-bold transition-colors flex items-center gap-1"
+                                >
+                                  <i className="fa-solid fa-plus text-purple-600"></i> 내역 등록
+                                </button>
+                              )}
+                              <button
+                                onClick={() => {
+                                  setSelectedEmp(emp);
+                                  setShowHistoryModal(true);
+                                }}
+                                className="bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 px-2.5 py-1.5 rounded-lg text-xs font-bold transition-colors flex items-center gap-1"
+                              >
+                                <i className="fa-solid fa-list text-slate-600"></i> 상세 내역
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+          </div>
+
+          {/* 모달 1: 대체휴무 내역 등록 */}
+          {showAddModal && selectedEmp && (
+            <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+              <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden border border-slate-200">
+                <div className="bg-purple-600 p-5 text-white flex justify-between items-center">
+                  <h3 className="font-extrabold text-lg flex items-center gap-2">
+                    <i className="fa-solid fa-file-circle-plus"></i>
+                    [{selectedEmp.name}] 대체휴무 내역 등록
+                  </h3>
+                  <button onClick={() => setShowAddModal(false)} className="text-purple-200 hover:text-white text-xl">
+                    <i className="fa-solid fa-xmark"></i>
+                  </button>
+                </div>
+
+                <form onSubmit={handleAddRecord} className="p-6 space-y-4 text-sm">
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 mb-1">구분 선택</label>
+                    <div className="grid grid-cols-3 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setRecordForm(prev => ({ ...prev, type: 'grant' }))}
+                        className={`p-2.5 rounded-xl font-bold text-xs border transition-all ${recordForm.type === 'grant' ? 'bg-emerald-600 text-white border-emerald-600 shadow-md' : 'bg-slate-50 text-slate-600 border-slate-200'}`}
+                      >
+                        <i className="fa-solid fa-plus-circle mr-1"></i> 대체휴무 부여
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setRecordForm(prev => ({ ...prev, type: 'use' }))}
+                        className={`p-2.5 rounded-xl font-bold text-xs border transition-all ${recordForm.type === 'use' ? 'bg-amber-600 text-white border-amber-600 shadow-md' : 'bg-slate-50 text-slate-600 border-slate-200'}`}
+                      >
+                        <i className="fa-solid fa-plane-departure mr-1"></i> 휴가 사용
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setRecordForm(prev => ({ ...prev, type: 'pay' }))}
+                        className={`p-2.5 rounded-xl font-bold text-xs border transition-all ${recordForm.type === 'pay' ? 'bg-indigo-600 text-white border-indigo-600 shadow-md' : 'bg-slate-50 text-slate-600 border-slate-200'}`}
+                      >
+                        <i className="fa-solid fa-hand-holding-dollar mr-1"></i> 수당 지불
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-xs font-bold text-slate-700 mb-1">일수 (일)</label>
+                      <input
+                        type="number"
+                        step="0.5"
+                        min="0.5"
+                        required
+                        value={recordForm.days}
+                        onChange={(e) => setRecordForm(prev => ({ ...prev, days: e.target.value }))}
+                        className="w-full p-2.5 border border-slate-300 rounded-lg text-sm font-bold outline-none focus:ring-2 focus:ring-purple-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-bold text-slate-700 mb-1">날짜</label>
+                      <input
+                        type="date"
+                        required
+                        value={recordForm.date}
+                        onChange={(e) => setRecordForm(prev => ({ ...prev, date: e.target.value }))}
+                        className="w-full p-2.5 border border-slate-300 rounded-lg text-sm font-bold outline-none focus:ring-2 focus:ring-purple-500"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 mb-1">사유 및 메모</label>
+                    <textarea
+                      rows="3"
+                      placeholder="예: 9/27(토) 주말 특근으로 인한 대체휴무 0.5일 부여"
+                      value={recordForm.memo}
+                      onChange={(e) => setRecordForm(prev => ({ ...prev, memo: e.target.value }))}
+                      className="w-full p-2.5 border border-slate-300 rounded-lg text-xs outline-none focus:ring-2 focus:ring-purple-500"
+                    ></textarea>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 mb-1">증빙서류 / 신청서 (PDF, 이미지 파일)</label>
+                    <input
+                      type="file"
+                      accept="application/pdf,image/*"
+                      onChange={handleFileUpload}
+                      className="w-full text-xs text-slate-500 file:mr-3 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-xs file:font-bold file:bg-purple-50 file:text-purple-700 hover:file:bg-purple-100"
+                    />
+                    {recordForm.attachment && (
+                      <p className="text-xs text-emerald-600 font-bold mt-1">
+                        <i className="fa-solid fa-paperclip mr-1"></i>{recordForm.attachment.name} 첨부 완료
+                      </p>
+                    )}
+                  </div>
+
+                  <div className="pt-2 flex justify-end gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setShowAddModal(false)}
+                      className="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl font-bold text-xs"
+                    >
+                      취소
+                    </button>
+                    <button
+                      type="submit"
+                      className="px-5 py-2.5 bg-purple-600 hover:bg-purple-700 text-white rounded-xl font-bold text-xs shadow-md"
+                    >
+                      저장하기
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          )}
+
+          {/* 모달 2: 상세 내역 및 첨부파일 관리 */}
+          {showHistoryModal && selectedEmp && (
+            <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+              <div className="bg-white rounded-2xl shadow-2xl w-full max-w-3xl overflow-hidden border border-slate-200 flex flex-col max-h-[85vh]">
+                <div className="bg-slate-800 p-5 text-white flex justify-between items-center">
+                  <div>
+                    <h3 className="font-extrabold text-lg flex items-center gap-2">
+                      <i className="fa-solid fa-list-check text-purple-400"></i>
+                      [{selectedEmp.name}] 대체휴무 전체 내역
+                    </h3>
+                    <p className="text-xs text-slate-300 mt-0.5">
+                      부여: {selectedEmp.dayoffStats.granted}일 | 사용: {selectedEmp.dayoffStats.used}일 | 지불: {selectedEmp.dayoffStats.paid}일 | <span className="text-purple-300 font-bold">잔여: {selectedEmp.dayoffStats.remaining}일</span>
+                    </p>
+                  </div>
+                  <button onClick={() => setShowHistoryModal(false)} className="text-slate-400 hover:text-white text-xl">
+                    <i className="fa-solid fa-xmark"></i>
+                  </button>
+                </div>
+
+                <div className="p-6 overflow-y-auto space-y-4 flex-1">
+                  {(!selectedEmp.dayoffRecords || selectedEmp.dayoffRecords.length === 0) ? (
+                    <div className="text-center py-12 text-slate-400 font-medium">
+                      등록된 대체휴무 내역이 없습니다.
+                    </div>
+                  ) : (
+                    <table className="w-full text-left text-xs">
+                      <thead className="bg-slate-100 border-b border-slate-200 text-slate-600">
+                        <tr>
+                          <th className="p-3 font-bold">날짜</th>
+                          <th className="p-3 font-bold text-center">구분</th>
+                          <th className="p-3 font-bold text-center">일수</th>
+                          <th className="p-3 font-bold">사유 및 메모</th>
+                          <th className="p-3 font-bold text-center">첨부서류</th>
+                          {currentUser?.role === 'master' && <th className="p-3 font-bold text-center">삭제</th>}
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {selectedEmp.dayoffRecords.map(record => (
+                          <tr key={record.id} className="hover:bg-slate-50">
+                            <td className="p-3 font-mono font-bold text-slate-700">{record.date}</td>
+                            <td className="p-3 text-center">{getTypeBadge(record.type)}</td>
+                            <td className="p-3 text-center font-extrabold text-slate-800">{record.days}일</td>
+                            <td className="p-3 text-slate-600">{record.memo || '-'}</td>
+                            <td className="p-3 text-center">
+                              {record.attachment ? (
+                                <button
+                                  onClick={() => handleViewAttachment(record.attachment)}
+                                  className="bg-purple-50 hover:bg-purple-100 text-purple-700 border border-purple-200 px-2 py-1 rounded font-bold flex items-center gap-1 mx-auto"
+                                >
+                                  <i className="fa-solid fa-file-pdf"></i> 보기
+                                </button>
+                              ) : <span className="text-slate-300">-</span>}
+                            </td>
+                            {currentUser?.role === 'master' && (
+                              <td className="p-3 text-center">
+                                <button
+                                  onClick={() => handleDeleteRecord(record.id)}
+                                  className="text-red-500 hover:text-red-700 p-1"
+                                  title="기록 삭제"
+                                >
+                                  <i className="fa-solid fa-trash-can"></i>
+                                </button>
+                              </td>
+                            )}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+                </div>
+
+                <div className="bg-slate-100 p-4 border-t border-slate-200 flex justify-end">
+                  <button
+                    onClick={() => setShowHistoryModal(false)}
+                    className="px-5 py-2 bg-slate-700 hover:bg-slate-800 text-white rounded-xl text-xs font-bold"
+                  >
+                    닫기
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+        </div>
+      </>
+    );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
